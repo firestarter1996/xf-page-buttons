@@ -1,0 +1,263 @@
+__id__ = "page_buttons"
+__name__ = "Page Up Down"
+__description__ = "Adds page up and page down buttons to every chat. Each tap moves the messages exactly one screen, and each button shows only when the chat can move that way."
+__author__ = "Justice"
+__version__ = "1.0.0"
+
+# Two round buttons in the same style as the stock "scroll to bottom" button sit
+# in the chat's side button column, above the stock buttons:
+#   * page up   (arrow up)   moves the messages one screen toward older messages;
+#   * page down (arrow down) moves them one screen toward newer messages.
+# One screen is the visible message area minus a small overlap, so the line you
+# were reading stays in view. Each button fades in only when the chat can scroll
+# that way and moves out of the way of the stock buttons, like they do.
+# Hidden in search results. Logcat tag: PageButtons.
+
+from java import jclass, dynamic_proxy
+from base_plugin import BasePlugin, MethodHook
+from hook_utils import find_class, get_private_field, set_private_field
+from android_utils import run_on_ui_thread, dp, OnClickListener
+from ui.settings import Header, Switch, Divider
+
+LOG_TAG = "PageButtons"
+MODE_SEARCH = 7
+OVERLAP_DP = 96
+
+View = jclass("android.view.View")
+FrameLayoutParams = jclass("android.widget.FrameLayout$LayoutParams")
+ValueAnimator = jclass("android.animation.ValueAnimator")
+UpdateListener = jclass("android.animation.ValueAnimator$AnimatorUpdateListener")
+RDrawable = jclass("org.telegram.messenger.R$drawable")
+RoundButton = jclass("org.telegram.ui.Components.chat.buttons.ChatActivityBlurredRoundPageDownButton")
+
+
+def _log(msg):
+    try:
+        jclass("android.util.Log").i(LOG_TAG, str(msg))
+    except Exception:
+        pass
+
+
+def _lerp(a, b, f):
+    return a + (b - a) * f
+
+
+class _Updater(dynamic_proxy(UpdateListener)):
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+
+    def onAnimationUpdate(self, animator):
+        self.fn(float(animator.getAnimatedValue()))
+
+
+class _Buttons:
+    """The two buttons of one chat screen and their visibility state."""
+
+    def __init__(self, chat, layout, up, down):
+        self.chat = chat
+        self.layout = layout
+        self.btn = {"up": up, "down": down}
+        self.vis = {"up": 0.0, "down": 0.0}
+        self.want = {"up": False, "down": False}
+        self.anim = {"up": None, "down": None}
+
+
+class PageButtonsPlugin(BasePlugin):
+
+    def create_settings(self):
+        return [
+            Header(text="Page Up Down"),
+            Switch(key="enabled", text="Show page buttons in chats", default=True,
+                   subtext="Up and down buttons that move the messages one screen per tap."),
+            Divider(text="Reopen a chat after changing this."),
+        ]
+
+    def on_plugin_load(self):
+        self.chats = {}            # side buttons layout hash -> _Buttons
+        self.scroll_hooked = set()
+        ca_cls = find_class("org.telegram.ui.ChatActivity")
+        side_cls = find_class("org.telegram.ui.Components.chat.layouts.ChatActivitySideControlsButtonsLayout")
+        ctx_cls = find_class("android.content.Context")
+        plugin = self
+
+        class CreateViewHook(MethodHook):
+            def after_hooked_method(self, param):
+                try:
+                    plugin._setup(param.thisObject)
+                except Exception as e:
+                    _log("setup: %s" % e)
+
+        class DestroyHook(MethodHook):
+            def after_hooked_method(self, param):
+                try:
+                    layout = get_private_field(param.thisObject, "sideControlsButtonsLayout")
+                    if layout is not None:
+                        plugin.chats.pop(int(layout.hashCode()), None)
+                except Exception:
+                    pass
+
+        class PositionsHook(MethodHook):
+            def after_hooked_method(self, param):
+                st = plugin.chats.get(int(param.thisObject.hashCode()))
+                if st is not None:
+                    try:
+                        plugin._place(st)
+                    except Exception as e:
+                        _log("place: %s" % e)
+
+        self.hook_method(ca_cls.getDeclaredMethod("createView", ctx_cls), CreateViewHook())
+        # a chat opened before the plugin engine finished loading (for example from a
+        # home screen shortcut) gets its buttons when it resumes
+        self.hook_method(ca_cls.getDeclaredMethod("onResume"), CreateViewHook())
+        self.hook_method(ca_cls.getDeclaredMethod("onFragmentDestroy"), DestroyHook())
+        self.hook_method(side_cls.getDeclaredMethod("checkButtonsPositionsAndVisibility"), PositionsHook())
+        self.log("Page Up Down loaded")
+        try:
+            from client_utils import get_last_fragment
+            frag = get_last_fragment()
+            if frag is not None and "ChatActivity" in str(frag.getClass().getName()):
+                run_on_ui_thread(lambda f=frag: self._setup(f))
+        except Exception as e:
+            _log("open chat at load: %s" % e)
+        _log("loaded " + __version__)
+
+    # ---- setup ---------------------------------------------------------------
+
+    def _icon(self, name):
+        """Drawable id and whether it is the named arrow (False = stock pagedown arrow)."""
+        try:
+            return int(getattr(RDrawable, name)), True
+        except Exception:
+            return int(RDrawable.pagedown), False
+
+    def _setup(self, chat):
+        if not bool(self.get_setting("enabled", True)):
+            return
+        layout = get_private_field(chat, "sideControlsButtonsLayout")
+        lv = get_private_field(chat, "chatListView")
+        if layout is None or lv is None:
+            return
+        old = self.chats.get(int(layout.hashCode()))
+        if old is not None:
+            self._update(old)
+            return
+        # never two pairs: drop any buttons an earlier setup of this screen left behind
+        for i in range(layout.getChildCount() - 1, -1, -1):
+            child = layout.getChildAt(i)
+            if child is not None and str(child.getContentDescription()) in ("Page up", "Page down"):
+                layout.removeView(child)
+        rp = get_private_field(layout, "resourcesProvider")
+        cp = get_private_field(layout, "colorProvider")
+        factory = get_private_field(layout, "blurredBackgroundDrawableViewFactory")
+        gravity = int(get_private_field(layout, "gravity"))
+        ctx = layout.getContext()
+        made = {}
+        for which, icon, desc in (("up", "msg_go_up", "Page up"), ("down", "msg_go_down", "Page down")):
+            res, named = self._icon(icon)
+            b = RoundButton.create(ctx, 56, 28 if named else 48, rp, factory, cp, res)
+            if not named and which == "up":
+                b.reverseIconByY()
+            b.setPivotX(float(dp(28)))
+            b.setPivotY(float(dp(36)))
+            b.setVisibility(View.GONE)
+            b.setContentDescription(desc)
+            direction = -1 if which == "up" else 1
+            b.setOnClickListener(OnClickListener(lambda v, c=chat, d=direction: self._page(c, d)))
+            layout.addView(b, FrameLayoutParams(dp(56), dp(64), gravity))
+            made[which] = b
+        st = _Buttons(chat, layout, made["up"], made["down"])
+        self.chats[int(layout.hashCode())] = st
+        self._hook_scroll(lv)
+        run_on_ui_thread(lambda: self._update(st), 400)
+
+    def _hook_scroll(self, lv):
+        listener = get_private_field(lv, "onScrollListener")
+        if listener is None:
+            return
+        cls = listener.getClass()
+        name = str(cls.getName())
+        if name in self.scroll_hooked:
+            return
+        self.scroll_hooked.add(name)
+        plugin = self
+
+        class ScrollHook(MethodHook):
+            def after_hooked_method(self, param):
+                try:
+                    chat = get_private_field(param.thisObject, "this$0")
+                    layout = get_private_field(chat, "sideControlsButtonsLayout") if chat is not None else None
+                    st = plugin.chats.get(int(layout.hashCode())) if layout is not None else None
+                    if st is not None:
+                        plugin._update(st)
+                except Exception as e:
+                    _log("scroll: %s" % e)
+
+        for m in cls.getDeclaredMethods():
+            if m.getName() in ("onScrolled", "onScrollStateChanged"):
+                self.hook_method(m, ScrollHook())
+
+    # ---- behavior --------------------------------------------------------------
+
+    def _page(self, chat, direction):
+        lv = get_private_field(chat, "chatListView")
+        if lv is None:
+            return
+        top = int(float(get_private_field(chat, "chatListViewPaddingTop") or 0))
+        bottom = int(get_private_field(chat, "blurredViewBottomOffset") or 0)
+        page = max(dp(100), lv.getMeasuredHeight() - top - bottom - dp(OVERLAP_DP))
+        try:
+            set_private_field(chat, "wasManualScroll", True)
+        except Exception:
+            pass
+        lv.stopScroll()
+        lv.smoothScrollBy(0, direction * page)
+        _log("page %s by %d px" % ("up" if direction < 0 else "down", page))
+
+    def _update(self, st):
+        lv = get_private_field(st.chat, "chatListView")
+        if lv is None:
+            return
+        mode = int(get_private_field(st.chat, "chatMode") or 0)
+        show = mode != MODE_SEARCH and bool(self.get_setting("enabled", True))
+        self._want(st, "up", show and bool(lv.canScrollVertically(-1)))
+        self._want(st, "down", show and bool(lv.canScrollVertically(1)))
+
+    def _want(self, st, which, show):
+        if st.want[which] == show:
+            return
+        st.want[which] = show
+        old = st.anim[which]
+        if old is not None:
+            old.cancel()
+        anim = ValueAnimator.ofFloat(float(st.vis[which]), 1.0 if show else 0.0)
+        anim.setDuration(280)
+
+        def step(v, s=st, w=which):
+            s.vis[w] = v
+            self._place(s)
+
+        anim.addUpdateListener(_Updater(step))
+        st.anim[which] = anim
+        anim.start()
+
+    def _place(self, st):
+        """Stack the two buttons above the visible stock buttons, like stock stacks its own."""
+        total = 0.0
+        holders = get_private_field(st.layout, "buttonHolders")
+        if holders is not None:
+            for h in holders:
+                if h is None:
+                    continue
+                vis = float(h.visibilityAnimator.getFloatValue())
+                cvis = float(h.counterVisibilityAnimator.getFloatValue())
+                total += (dp(44) + dp(10 + 10 * cvis)) * vis
+        for which in ("down", "up"):
+            b = st.btn[which]
+            v = float(st.vis[which])
+            b.setVisibility(View.VISIBLE if v > 0 else View.GONE)
+            b.setAlpha(v)
+            b.setScaleX(_lerp(0.7, 1.0, v))
+            b.setScaleY(_lerp(0.7, 1.0, v))
+            b.setTranslationY(float(dp(80) * (1.0 - v) - total))
+            total += (dp(44) + dp(10)) * v
