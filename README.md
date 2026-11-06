@@ -19,7 +19,9 @@ Long bot replies fill my chats. Flinging overshoots, and the stock button only j
 
 Off by default. On moves the whole button column to the left edge and mirrors the chat: your messages on the left, everyone else on the right, sender pictures on the right edge.
 
-Since 1.3.2 no button ever covers a bubble. Bubbles that stock gives the full width (your own, and everyone's in private chats) are narrowed by the same 52 dp stock takes from group bubbles for the sender picture, and every bubble starts to the right of the button column and ends before the right edge or the sender pictures. With the switch off nothing changes.
+Sender pictures move with the mirror: in groups they sit on the right edge, beside the other person's bubble, exactly where stock puts them on the left.
+
+Since 1.3.2 no button ever covers a bubble (1.3.3 widens the gap a little more for photo albums). Bubbles that stock gives the full width (your own, and everyone's in private chats) are narrowed by the same 52 dp stock takes from group bubbles for the sender picture, and every bubble starts to the right of the button column and ends before the right edge or the sender pictures. With the switch off nothing changes.
 
 ## Install
 
@@ -34,7 +36,7 @@ The plugin hooks `ChatActivity.createView` and `onResume` and adds its buttons t
 
 ## Tested
 
-Nagram XF 12.10.1 plugin build on a Pixel 6 Pro running the same build and settings as my daily phone, in a busy forum topic with long bot replies and long messages of my own. With swap on, the buttons end about 50 dp from the left edge and every bubble, mine and the bot's, starts past them. With swap off the chat looks exactly like stock.
+Nagram XF 12.10.1 plugin build on a Pixel 6 Pro running the same build and settings as my daily phone, in a busy forum topic with long bot replies and long messages of my own. With swap on, the buttons end about 50 dp from the left edge and every bubble, mine and the bot's, starts past them. In a busy group the sender pictures sat on the right edge next to their bubbles. With swap off the chat looks exactly like stock.
 
 ## License
 
