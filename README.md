@@ -17,7 +17,11 @@ Long bot replies fill my chats. Flinging overshoots, and the stock button only j
 
 ## Swap buttons position
 
-Off by default. On moves the whole button column to the left edge, over the column where group chats show sender pictures. The pictures are what the buttons cover, never a message: everyone else's bubbles start just right of the buttons, and your own bubbles stay on the right at their normal size. With the switch off nothing changes.
+Off by default. On moves the whole button column to the left edge and mirrors the chat: your messages on the left, everyone else on the right, sender pictures on the right edge.
+
+No button ever covers a message. Every bubble, yours and everyone else's, with or without a picture, albums and stickers included, starts to the right of the button column. Service messages and dates center in the space beside the buttons. With the switch off nothing changes.
+
+A switch side button sits above the top button. One tap flips the column between right and left: the setting is saved and the open chat is laid out once on the new side.
 
 ## Install
 
@@ -28,11 +32,11 @@ Off by default. On moves the whole button column to the left edge, over the colu
 
 ## How it works
 
-The plugin hooks `ChatActivity.createView` and `onResume` and adds its buttons to the chat's `sideControlsButtonsLayout`, and hooks `checkButtonsPositionsAndVisibility` to keep them stacked in fixed places. A page tap scrolls by the visible message area minus the bars and an overlap. Swap mode moves other people's message cells once in `ChatMessageCell.onLayout` and narrows their full width bubbles in private chats in `MessageObject.getMaxMessageTextWidth`, so nothing extra runs while drawing or scrolling. Logcat tag `PageButtons`.
+The plugin hooks `ChatActivity.createView` and `onResume` and adds its buttons to the chat's `sideControlsButtonsLayout`, and hooks `checkButtonsPositionsAndVisibility` to keep them stacked in fixed places. A page tap scrolls by the visible message area minus the bars and an overlap. Swap mode moves each message cell once in `ChatMessageCell.onLayout` (and `ChatActionCell.onLayout` for service messages) and narrows full width bubbles in `MessageObject.getMaxMessageTextWidth`, so nothing extra runs while drawing or scrolling. Logcat tag `PageButtons`.
 
 ## Tested
 
-Nagram XF 12.10.1 plugin build on a Pixel 6 Pro running the same build and settings as my daily phone, in a busy forum topic with long bot replies and long messages of my own. In a busy group with swap on, the buttons sat over the sender pictures on the left and every message started right of them. With swap off the chat looked exactly like stock. With swap off the chat looks exactly like stock.
+Nagram XF 12.10.1 plugin build on a Pixel 6 Pro running the same build and settings as my daily phone, in a busy forum topic with long bot replies and long messages of my own. In a busy group with the buttons on the left, the sender pictures sat on the right edge and every message started right of the buttons. One tap on the switch side button moved everything back to stock, and another tap back again. With swap off the chat looks exactly like stock.
 
 ## License
 
