@@ -1,8 +1,8 @@
 __id__ = "page_buttons"
 __name__ = "Page Up Down"
-__description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left, over the sender pictures column, and starts everyone else's messages just right of the buttons so no message is covered. Made by [firestarter1996](https://github.com/firestarter1996)."
+__description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left, everyone else on the right and every message clear of the buttons. A switch button above top flips the side with one tap. Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.3.4"
+__version__ = "1.3.5"
 
 # Two round buttons in the same style as the stock "scroll to bottom" button sit
 # right above it in the chat's side button column:
@@ -152,10 +152,10 @@ class _DatePicked(dynamic_proxy(IntCallback)):
 class _Buttons:
     """The two buttons of one chat screen and their visibility state."""
 
-    def __init__(self, chat, layout, top, up, down):
+    def __init__(self, chat, layout, top, up, down, side):
         self.chat = chat
         self.layout = layout
-        self.btn = {"top": top, "up": up, "down": down}
+        self.btn = {"top": top, "up": up, "down": down, "side": side}
         self.show = True
         self.holders = None
 
@@ -296,7 +296,7 @@ class PageButtonsPlugin(BasePlugin):
         # never two pairs: drop any buttons an earlier setup of this screen left behind
         for i in range(layout.getChildCount() - 1, -1, -1):
             child = layout.getChildAt(i)
-            if child is not None and str(child.getContentDescription()) in ("Go to top", "Page up", "Page down"):
+            if child is not None and str(child.getContentDescription()) in ("Go to top", "Page up", "Page down", "Switch button side"):
                 layout.removeView(child)
         rp = get_private_field(layout, "resourcesProvider")
         cp = get_private_field(layout, "colorProvider")
@@ -334,7 +334,15 @@ class PageButtonsPlugin(BasePlugin):
         except Exception as e:
             _log("top icon: %s" % e)
         made["top"] = b
-        st = _Buttons(chat, layout, made["top"], made["up"], made["down"])
+        # 1.3.5: a switch side button above top flips the column between right and left
+        res, named = self._icon("menu_switch")
+        b = RoundButton.create(ctx, 56, 28 if named else 48, rp, factory, cp, res)
+        b.setPivotX(float(dp(28)))
+        b.setPivotY(float(dp(36)))
+        b.setContentDescription("Switch button side")
+        b.setOnClickListener(OnClickListener(lambda v, c=chat: self._flip_side(c)))
+        layout.addView(b, FrameLayoutParams(dp(56), dp(64), gravity))
+        st = _Buttons(chat, layout, made["top"], made["up"], made["down"], b)
         mode = int(get_private_field(chat, "chatMode") or 0)
         st.show = mode != MODE_SEARCH
         self.chats[int(layout.hashCode())] = st
@@ -346,6 +354,34 @@ class PageButtonsPlugin(BasePlugin):
         self._place(st)
 
     # ---- behavior --------------------------------------------------------------
+
+    def _flip_side(self, chat):
+        """One tap: save the other side, move the column, and lay the messages out once again."""
+        try:
+            self.set_setting("swap", not bool(self.get_setting("swap", False)))
+            layout = get_private_field(chat, "sideControlsButtonsLayout")
+            if layout is not None:
+                self._apply_side(layout)
+            # message widths depend on the side (the width hook), so their text is laid out again
+            msgs = get_private_field(chat, "messages")
+            if msgs is not None:
+                lc = find_class("org.telegram.messenger.MessageObject").getDeclaredField("layoutCreated")
+                lc.setAccessible(True)
+                for i in range(msgs.size()):
+                    try:
+                        lc.setBoolean(msgs.get(i), False)
+                    except Exception:
+                        pass
+            lv = get_private_field(chat, "chatListView")
+            adapter = get_private_field(chat, "chatAdapter")
+            if adapter is not None:
+                adapter.notifyDataSetChanged()
+            if lv is not None:
+                for i in range(lv.getChildCount()):
+                    lv.getChildAt(i).forceLayout()
+                lv.requestLayout()
+        except Exception as e:
+            _log("flip: %s" % e)
 
     def _apply_side(self, layout):
         """Right (stock) or Left edge for the whole side button column; once per chat setup or resume."""
@@ -403,23 +439,57 @@ class PageButtonsPlugin(BasePlugin):
                     br = int(cell.getBackgroundDrawableRight())
                     if br <= bl:
                         return
+                    avatar = vis.getBoolean(cell)
                     out = mo.isOutOwner()
-                    if out:
-                        return              # your own bubbles stay on the right, stock size and place
-                    # 1.3.4: the chat keeps its stock layout; sender pictures stay in the left column,
-                    # which is what the buttons cover. Other people's bubbles start right of the buttons.
+                    # mirror the bubble BODY (the tail stays on its stock side), so stacked
+                    # bubbles line up on the new side the way they do on the stock side
                     tl = 0
                     if not pin_f.getBoolean(cell) and not media_f.getBoolean(cell):
                         tl = tail
-                    body_off = tl                     # incoming tail sits on the left of the body
-                    if left0 + bl + body_off < gutter:
-                        cell.offsetLeftAndRight(gutter - (left0 + bl + body_off))
+                    body_l = bl + (0 if out else tl)
+                    body_r = br - (tl if out else 0)
+                    ts = pw - (left0 + body_r) - (body_l - bl)   # mirrored bubble left edge on screen
+                    # 1.3.2: never under the button column on the left, never past the right edge
+                    # (or into the sender pictures); widths were already narrowed by the width hook
+                    right_lim = pw - (edge if avatar else gap_r)
+                    ts = min(ts, right_lim - (body_r - bl))
+                    ts = max(ts, gutter - (body_l - bl))
+                    if int(side_f.getInt(cell)) != 0:
+                        # the share button stays beside the bubble, so keep room for it on screen
+                        if out:
+                            ts = max(ts, side_gap)
+                        else:
+                            lim = pw - side_gap - (edge if avatar else 0)
+                            ts = min(ts, lim - (br - bl))
+                    off = ts - (left0 + bl)
+                    if off != 0:
+                        cell.offsetLeftAndRight(off)
+                    if avatar:
+                        # the chat list draws sender pictures in its own coordinates, not the cell's
+                        cell.getAvatarImage().setImageX(float(pw - edge))
                 except Exception as e:
                     _log("mirror: %s" % e)
 
         bool_t = jclass("java.lang.Boolean").TYPE
         int_t = jclass("java.lang.Integer").TYPE
         self.hook_method(cell_cls.getDeclaredMethod("onLayout", bool_t, int_t, int_t, int_t, int_t), LayoutHook())
+
+        # 1.3.5: service messages and dates center in the space right of the buttons
+        half = gutter // 2
+
+        class ActionHook(MethodHook):
+            def after_hooked_method(self, param):
+                if plugin.side_left:
+                    try:
+                        param.thisObject.offsetLeftAndRight(half)
+                    except Exception:
+                        pass
+
+        try:
+            act_cls = find_class("org.telegram.ui.Cells.ChatActionCell")
+            self.hook_method(act_cls.getDeclaredMethod("onLayout", bool_t, int_t, int_t, int_t, int_t), ActionHook())
+        except Exception as e:
+            _log("action hook: %s" % e)
 
         # 1.3.2: every bubble that stock gives the full width (your own messages, and everyone's in
         # private chats) loses the same 52 dp stock takes from group bubbles for the sender picture,
@@ -437,9 +507,7 @@ class PageButtonsPlugin(BasePlugin):
                     return
                 try:
                     mo = param.thisObject
-                    if mo.isOutOwner():
-                        return
-                    if bool(need_av.invoke(mo)) and not mo.messageOwner.isThreadMessage:
+                    if bool(need_av.invoke(mo)) and not mo.isOutOwner() and not mo.messageOwner.isThreadMessage:
                         return
                     w = int(param.getResult())
                     if w > narrow * 3:
@@ -448,7 +516,7 @@ class PageButtonsPlugin(BasePlugin):
                     _log("width: %s" % e)
 
         self.hook_method(mo_cls.getDeclaredMethod("getMaxMessageTextWidth"), WidthHook())
-        _log("swap layout on")
+        _log("bubbles mirrored")
 
     def _hold_start(self, rep_run):
         """Long press: page once now (the press already lasted about 400 ms), then repeat."""
@@ -611,7 +679,7 @@ class PageButtonsPlugin(BasePlugin):
         shown = st.show and self._is_enabled()
         step = dp(STEP_DP) if shown else 0
         y = base
-        for which in ("down", "up", "top"):
+        for which in ("down", "up", "top", "side"):
             b = st.btn[which]
             b.setVisibility(View.VISIBLE if shown else View.GONE)
             b.setAlpha(1.0)
@@ -619,7 +687,7 @@ class PageButtonsPlugin(BasePlugin):
             b.setScaleY(1.0)
             b.setTranslationY(float(-y))
             y += step
-        extra = 3 * step
+        extra = 4 * step
         if holders is not None and extra > 0:
             for i in range(2, len(holders)):
                 h = holders[i]
