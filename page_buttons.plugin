@@ -2,7 +2,7 @@ __id__ = "page_buttons"
 __name__ = "Page Up Down"
 __description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left and everyone else on the right. Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.3.2"
+__version__ = "1.3.3"
 
 # Two round buttons in the same style as the stock "scroll to bottom" button sit
 # right above it in the chat's side button column:
@@ -70,7 +70,7 @@ AlertsCreator = jclass("org.telegram.ui.Components.AlertsCreator")
 RoundButton = jclass("org.telegram.ui.Components.chat.buttons.ChatActivityBlurredRoundPageDownButton")
 
 
-GUTTER_DP = 54
+GUTTER_DP = 57
 
 
 def _log(msg):
