@@ -1,34 +1,76 @@
 __id__ = "page_buttons"
 __name__ = "Page Up Down"
-__description__ = "Adds page up and page down buttons to every chat. Each tap moves the messages exactly one screen, and each button shows only when the chat can move that way."
-__author__ = "Justice"
-__version__ = "1.0.0"
+__description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left and everyone else on the right. Made by [firestarter1996](https://github.com/firestarter1996)."
+__author__ = "firestarter1996"
+__version__ = "1.3.2"
 
 # Two round buttons in the same style as the stock "scroll to bottom" button sit
-# in the chat's side button column, above the stock buttons:
+# right above it in the chat's side button column:
 #   * page up   (arrow up)   moves the messages one screen toward older messages;
 #   * page down (arrow down) moves them one screen toward newer messages.
-# One screen is the visible message area minus a small overlap, so the line you
-# were reading stays in view. Each button fades in only when the chat can scroll
-# that way and moves out of the way of the stock buttons, like they do.
-# Hidden in search results. Logcat tag: PageButtons.
+# The stock scroll to bottom button gets an arrow with a line under it, so it reads
+# as "end" and not as a second page down. All three stay visible in fixed places
+# (no fading in and out while you scroll); mention and reaction buttons stack
+# above them. The end button always goes to the very bottom of the newest message
+# (stock went to the top of a long last message, or back to an earlier jump point).
+# Hidden in search results.
+# Holding page up or page down keeps paging: the first extra page about 400 ms
+# after the press, then one page about every 350 ms so the list settles between
+# steps, until you let go or the list reaches its top or bottom. One repeat at a
+# time per button, cancelled on release.
+# Swap buttons position (setting, off by default; was Button side Right or Left before
+# 1.3.0): on moves the whole side button column to the left edge,
+# so the end button, page buttons, mention and reaction buttons stay stacked together.
+# When swapped, the sender pictures in group chats move to the right edge so they never
+# sit under the buttons (a hook on the message cell's layout, added only when Left
+# is on; off leaves the pictures exactly as stock).
+# Speed (1.1.2): the button placement runs on every frame of the side buttons'
+# animations, so it reads the button list once per chat screen and the on or off
+# setting at most twice a second.
+# Top (1.3.0): a fourth button above page up, an up arrow with a line above it. One tap
+# jumps straight to the first message of the chat, or of the topic, the way stock jump
+# to date does (only the page around that message is loaded, no scrolling through
+# history). Holding it opens the stock calendar to pick a date. No polling, nothing
+# runs until it is tapped.
+# Logcat tag: PageButtons.
 
-from java import jclass, dynamic_proxy
+import time
+
+from java import jclass, dynamic_proxy, jarray
 from base_plugin import BasePlugin, MethodHook
 from hook_utils import find_class, get_private_field, set_private_field
 from android_utils import run_on_ui_thread, dp, OnClickListener
-from ui.settings import Header, Switch, Divider
+from ui.settings import Header, Switch, Divider, Selector
 
 LOG_TAG = "PageButtons"
 MODE_SEARCH = 7
+BUTTON_PAGE_DOWN = 1
+STEP_DP = 54
 OVERLAP_DP = 96
+REPEAT_FIRST_MS = 400
+REPEAT_MS = 350
 
 View = jclass("android.view.View")
 FrameLayoutParams = jclass("android.widget.FrameLayout$LayoutParams")
 ValueAnimator = jclass("android.animation.ValueAnimator")
 UpdateListener = jclass("android.animation.ValueAnimator$AnimatorUpdateListener")
 RDrawable = jclass("org.telegram.messenger.R$drawable")
+GradientDrawable = jclass("android.graphics.drawable.GradientDrawable")
+LayerDrawable = jclass("android.graphics.drawable.LayerDrawable")
+Gravity = jclass("android.view.Gravity")
+Drawable = jclass("android.graphics.drawable.Drawable")
+Handler = jclass("android.os.Handler")
+Looper = jclass("android.os.Looper")
+MotionEvent = jclass("android.view.MotionEvent")
+OnTouchIface = jclass("android.view.View$OnTouchListener")
+OnLongClickIface = jclass("android.view.View$OnLongClickListener")
+RunnableIface = jclass("java.lang.Runnable")
+IntCallback = jclass("org.telegram.messenger.MessagesStorage$IntCallback")
+AlertsCreator = jclass("org.telegram.ui.Components.AlertsCreator")
 RoundButton = jclass("org.telegram.ui.Components.chat.buttons.ChatActivityBlurredRoundPageDownButton")
+
+
+GUTTER_DP = 54
 
 
 def _log(msg):
@@ -51,16 +93,71 @@ class _Updater(dynamic_proxy(UpdateListener)):
         self.fn(float(animator.getAnimatedValue()))
 
 
+class _Touch(dynamic_proxy(OnTouchIface)):
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+
+    def onTouch(self, view, event):
+        self.fn(int(event.getActionMasked()))
+        return False   # the button still gets the event, so a tap stays a tap
+
+
+class _LongClick(dynamic_proxy(OnLongClickIface)):
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+
+    def onLongClick(self, view):
+        return bool(self.fn())
+
+
+class _Repeat(dynamic_proxy(RunnableIface)):
+    """One page per run while the button is held; reposts itself only while held."""
+
+    def __init__(self, plugin, chat, direction):
+        super().__init__()
+        self.plugin = plugin
+        self.chat = chat
+        self.direction = direction
+        self.held = False
+
+    def run(self):
+        if not self.held:
+            return
+        if not self.plugin._page(self.chat, self.direction):
+            self.held = False   # top or bottom reached
+            return
+        self.plugin.handler.postDelayed(self, REPEAT_MS)
+
+
+class _Once(dynamic_proxy(RunnableIface)):
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+
+    def run(self):
+        self.fn()
+
+
+class _DatePicked(dynamic_proxy(IntCallback)):
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+
+    def run(self, param):
+        self.fn(param)
+
+
 class _Buttons:
     """The two buttons of one chat screen and their visibility state."""
 
-    def __init__(self, chat, layout, up, down):
+    def __init__(self, chat, layout, top, up, down):
         self.chat = chat
         self.layout = layout
-        self.btn = {"up": up, "down": down}
-        self.vis = {"up": 0.0, "down": 0.0}
-        self.want = {"up": False, "down": False}
-        self.anim = {"up": None, "down": None}
+        self.btn = {"top": top, "up": up, "down": down}
+        self.show = True
+        self.holders = None
 
 
 class PageButtonsPlugin(BasePlugin):
@@ -69,13 +166,27 @@ class PageButtonsPlugin(BasePlugin):
         return [
             Header(text="Page Up Down"),
             Switch(key="enabled", text="Show page buttons in chats", default=True,
-                   subtext="Up and down buttons that move the messages one screen per tap."),
-            Divider(text="Reopen a chat after changing this."),
+                   subtext="Up and down buttons that move the messages one screen per tap, and an end arrow with a line under it."),
+            Switch(key="swap", text="Swap buttons position", default=False),
+            Divider(text="Reopen a chat after changing these."),
         ]
 
     def on_plugin_load(self):
         self.chats = {}            # side buttons layout hash -> _Buttons
-        self.scroll_hooked = set()
+        self.end_icons = set()     # stock end buttons that already got the new icon
+        self.enabled_t = 0.0
+        self.enabled = True
+        self.handler = Handler(Looper.getMainLooper())
+        self.avatar_hook = False
+        self.side_left = False
+        # 1.3.0: the Right / Left choice became one switch; an old Left choice turns it on
+        try:
+            if int(self.get_setting("side", 0) or 0) == 1 and self.get_setting("swap", None) is None:
+                self.set_setting("swap", True)
+            if self.get_setting("side", None) is not None:
+                self.set_setting("side", 0)
+        except Exception as e:
+            _log("migrate side: %s" % e)
         ca_cls = find_class("org.telegram.ui.ChatActivity")
         side_cls = find_class("org.telegram.ui.Components.chat.layouts.ChatActivitySideControlsButtonsLayout")
         ctx_cls = find_class("android.content.Context")
@@ -106,7 +217,47 @@ class PageButtonsPlugin(BasePlugin):
                     except Exception as e:
                         _log("place: %s" % e)
 
+        class ShowHook(MethodHook):
+            def before_hooked_method(self, param):
+                # the stock end button stays visible and never fades in or out
+                try:
+                    st = plugin.chats.get(int(param.thisObject.hashCode()))
+                    if st is not None and st.show and int(param.args[0]) == BUTTON_PAGE_DOWN:
+                        param.args[1] = True
+                        param.args[2] = False
+                except Exception as e:
+                    _log("show: %s" % e)
+
+        class EndHook(MethodHook):
+            def before_hooked_method(self, param):
+                # End = the very bottom of the newest message, every time (owner 11-04-2026: "End button not
+                # working in usage topic. It jumps to near the top"): no return to an earlier jump point and no
+                # stop at the top of a long last message
+                try:
+                    if not bool(plugin.get_setting("enabled", True)):
+                        return
+                    chat = param.thisObject
+                    mode = int(get_private_field(chat, "chatMode") or 0)
+                    if mode == MODE_SEARCH:
+                        return
+                    set_private_field(chat, "wasManualScroll", True)
+                    set_private_field(chat, "createUnreadMessageAfterId", 0)
+                    set_private_field(chat, "returnToMessageId", 0)
+                    try:
+                        get_private_field(chat, "returnToMessageIdsStack").clear()
+                    except Exception:
+                        pass
+                    set_private_field(chat, "forceScrollToMessageBottom", False)
+                    chat.scrollToLastMessage(True, False)
+                    param.setResult(None)
+                except Exception as e:
+                    _log("end: %s" % e)
+
+        self.hook_method(ca_cls.getDeclaredMethod("onPageDownClicked"), EndHook())
         self.hook_method(ca_cls.getDeclaredMethod("createView", ctx_cls), CreateViewHook())
+        bool_t = jclass("java.lang.Boolean").TYPE
+        int_t = jclass("java.lang.Integer").TYPE
+        self.hook_method(side_cls.getDeclaredMethod("showButton", int_t, bool_t, bool_t), ShowHook())
         # a chat opened before the plugin engine finished loading (for example from a
         # home screen shortcut) gets its buttons when it resumes
         self.hook_method(ca_cls.getDeclaredMethod("onResume"), CreateViewHook())
@@ -138,14 +289,14 @@ class PageButtonsPlugin(BasePlugin):
         lv = get_private_field(chat, "chatListView")
         if layout is None or lv is None:
             return
+        self._apply_side(layout)
         old = self.chats.get(int(layout.hashCode()))
         if old is not None:
-            self._update(old)
             return
         # never two pairs: drop any buttons an earlier setup of this screen left behind
         for i in range(layout.getChildCount() - 1, -1, -1):
             child = layout.getChildAt(i)
-            if child is not None and str(child.getContentDescription()) in ("Page up", "Page down"):
+            if child is not None and str(child.getContentDescription()) in ("Go to top", "Page up", "Page down"):
                 layout.removeView(child)
         rp = get_private_field(layout, "resourcesProvider")
         cp = get_private_field(layout, "colorProvider")
@@ -160,49 +311,180 @@ class PageButtonsPlugin(BasePlugin):
                 b.reverseIconByY()
             b.setPivotX(float(dp(28)))
             b.setPivotY(float(dp(36)))
-            b.setVisibility(View.GONE)
             b.setContentDescription(desc)
             direction = -1 if which == "up" else 1
             b.setOnClickListener(OnClickListener(lambda v, c=chat, d=direction: self._page(c, d)))
+            rep_run = _Repeat(self, chat, direction)
+            b.setOnLongClickListener(_LongClick(lambda r=rep_run: self._hold_start(r)))
+            b.setOnTouchListener(_Touch(lambda action, r=rep_run: self._hold_touch(r, action)))
             layout.addView(b, FrameLayoutParams(dp(56), dp(64), gravity))
             made[which] = b
-        st = _Buttons(chat, layout, made["up"], made["down"])
+        res, named = self._icon("msg_go_up")
+        b = RoundButton.create(ctx, 56, 28 if named else 48, rp, factory, cp, res)
+        if not named:
+            b.reverseIconByY()
+        b.setPivotX(float(dp(28)))
+        b.setPivotY(float(dp(36)))
+        b.setContentDescription("Go to top")
+        b.setOnClickListener(OnClickListener(lambda v, c=chat: self._go_top(c)))
+        b.setOnLongClickListener(_LongClick(lambda c=chat: self._pick_date(c)))
+        layout.addView(b, FrameLayoutParams(dp(56), dp(64), gravity))
+        try:
+            self._line_icon(b, "msg_go_up", True)
+        except Exception as e:
+            _log("top icon: %s" % e)
+        made["top"] = b
+        st = _Buttons(chat, layout, made["top"], made["up"], made["down"])
+        mode = int(get_private_field(chat, "chatMode") or 0)
+        st.show = mode != MODE_SEARCH
         self.chats[int(layout.hashCode())] = st
-        self._hook_scroll(lv)
-        run_on_ui_thread(lambda: self._update(st), 400)
-
-    def _hook_scroll(self, lv):
-        listener = get_private_field(lv, "onScrollListener")
-        if listener is None:
-            return
-        cls = listener.getClass()
-        name = str(cls.getName())
-        if name in self.scroll_hooked:
-            return
-        self.scroll_hooked.add(name)
-        plugin = self
-
-        class ScrollHook(MethodHook):
-            def after_hooked_method(self, param):
-                try:
-                    chat = get_private_field(param.thisObject, "this$0")
-                    layout = get_private_field(chat, "sideControlsButtonsLayout") if chat is not None else None
-                    st = plugin.chats.get(int(layout.hashCode())) if layout is not None else None
-                    if st is not None:
-                        plugin._update(st)
-                except Exception as e:
-                    _log("scroll: %s" % e)
-
-        for m in cls.getDeclaredMethods():
-            if m.getName() in ("onScrolled", "onScrollStateChanged"):
-                self.hook_method(m, ScrollHook())
+        if st.show:
+            try:
+                layout.showButton(BUTTON_PAGE_DOWN, True, False)
+            except Exception as e:
+                _log("show end: %s" % e)
+        self._place(st)
 
     # ---- behavior --------------------------------------------------------------
 
+    def _apply_side(self, layout):
+        """Right (stock) or Left edge for the whole side button column; once per chat setup or resume."""
+        try:
+            left = bool(self.get_setting("swap", False))
+            self.side_left = left
+            lp = layout.getLayoutParams()
+            if lp is None:
+                return
+            want = (Gravity.LEFT if left else Gravity.RIGHT) | Gravity.BOTTOM
+            if int(lp.gravity) != want:
+                lp.gravity = want
+                layout.setLayoutParams(lp)
+            if left and not self.avatar_hook:
+                self._hook_avatars()
+        except Exception as e:
+            _log("side: %s" % e)
+
+    def _hook_avatars(self):
+        """Swap on: every message bubble is mirrored across the chat, so your bubbles sit on the left,
+        everyone else's on the right and sender pictures on the right edge. The cell is moved once,
+        when it is laid out (a new message on screen, an edit, a resize); nothing runs while drawing
+        or scrolling. Service messages are their own cell type and stay centered."""
+        self.avatar_hook = True
+        cell_cls = find_class("org.telegram.ui.Cells.ChatMessageCell")
+        vis = cell_cls.getDeclaredField("isAvatarVisible")
+        vis.setAccessible(True)
+        side_f = cell_cls.getDeclaredField("drawSideButton")
+        side_f.setAccessible(True)
+        pin_f = cell_cls.getDeclaredField("drawPinnedBottom")
+        media_f = cell_cls.getDeclaredField("mediaBackground")
+        media_f.setAccessible(True)
+        tail = dp(6)
+        edge = dp(48)
+        gutter = dp(GUTTER_DP)
+        gap_r = dp(8)
+        side_gap = dp(48)
+        plugin = self
+
+        class LayoutHook(MethodHook):
+            def after_hooked_method(self, param):
+                if not plugin.side_left:
+                    return
+                try:
+                    cell = param.thisObject
+                    mo = cell.getMessageObject()
+                    parent = cell.getParent()
+                    if mo is None or parent is None:
+                        return
+                    pw = int(parent.getWidth())
+                    if pw <= 0:
+                        return
+                    left0 = int(param.args[1])      # where the list placed the cell (stock spot)
+                    bl = int(cell.getBackgroundDrawableLeft())
+                    br = int(cell.getBackgroundDrawableRight())
+                    if br <= bl:
+                        return
+                    avatar = vis.getBoolean(cell)
+                    out = mo.isOutOwner()
+                    # mirror the bubble BODY (the tail stays on its stock side), so stacked
+                    # bubbles line up on the new side the way they do on the stock side
+                    tl = 0
+                    if not pin_f.getBoolean(cell) and not media_f.getBoolean(cell):
+                        tl = tail
+                    body_l = bl + (0 if out else tl)
+                    body_r = br - (tl if out else 0)
+                    ts = pw - (left0 + body_r) - (body_l - bl)   # mirrored bubble left edge on screen
+                    # 1.3.2: never under the button column on the left, never past the right edge
+                    # (or into the sender pictures); widths were already narrowed by the width hook
+                    right_lim = pw - (edge if avatar else gap_r)
+                    ts = min(ts, right_lim - (body_r - bl))
+                    ts = max(ts, gutter - (body_l - bl))
+                    if int(side_f.getInt(cell)) != 0:
+                        # the share button stays beside the bubble, so keep room for it on screen
+                        if out:
+                            ts = max(ts, side_gap)
+                        else:
+                            lim = pw - side_gap - (edge if avatar else 0)
+                            ts = min(ts, lim - (br - bl))
+                    off = ts - (left0 + bl)
+                    if off != 0:
+                        cell.offsetLeftAndRight(off)
+                    if avatar:
+                        # the chat list draws sender pictures in its own coordinates, not the cell's
+                        cell.getAvatarImage().setImageX(float(pw - edge))
+                except Exception as e:
+                    _log("mirror: %s" % e)
+
+        bool_t = jclass("java.lang.Boolean").TYPE
+        int_t = jclass("java.lang.Integer").TYPE
+        self.hook_method(cell_cls.getDeclaredMethod("onLayout", bool_t, int_t, int_t, int_t, int_t), LayoutHook())
+
+        # 1.3.2: every bubble that stock gives the full width (your own messages, and everyone's in
+        # private chats) loses the same 52 dp stock takes from group bubbles for the sender picture,
+        # so the mirrored bubble fits between the button column and the right edge. Runs once per
+        # message when its text is laid out, never while drawing or scrolling.
+        mo_cls = find_class("org.telegram.messenger.MessageObject")
+        need_av = mo_cls.getDeclaredMethod("needDrawAvatarInternal")
+        need_av.setAccessible(True)
+        narrow = dp(52)
+        JInteger = jclass("java.lang.Integer")
+
+        class WidthHook(MethodHook):
+            def after_hooked_method(self, param):
+                if not plugin.side_left:
+                    return
+                try:
+                    mo = param.thisObject
+                    if bool(need_av.invoke(mo)) and not mo.isOutOwner() and not mo.messageOwner.isThreadMessage:
+                        return
+                    w = int(param.getResult())
+                    if w > narrow * 3:
+                        param.setResult(JInteger(w - narrow))
+                except Exception as e:
+                    _log("width: %s" % e)
+
+        self.hook_method(mo_cls.getDeclaredMethod("getMaxMessageTextWidth"), WidthHook())
+        _log("bubbles mirrored")
+
+    def _hold_start(self, rep_run):
+        """Long press: page once now (the press already lasted about 400 ms), then repeat."""
+        self.handler.removeCallbacks(rep_run)
+        rep_run.held = True
+        rep_run.run()
+        return True   # consumed, so letting go does not add a tap page
+
+    def _hold_touch(self, rep_run, action):
+        if action in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
+            if rep_run.held:
+                rep_run.held = False
+                self.handler.removeCallbacks(rep_run)
+
     def _page(self, chat, direction):
+        """One screen up (-1) or down (1). False when the list cannot move that way."""
         lv = get_private_field(chat, "chatListView")
         if lv is None:
-            return
+            return False
+        if not bool(lv.canScrollVertically(direction)):
+            return False
         top = int(float(get_private_field(chat, "chatListViewPaddingTop") or 0))
         bottom = int(get_private_field(chat, "blurredViewBottomOffset") or 0)
         page = max(dp(100), lv.getMeasuredHeight() - top - bottom - dp(OVERLAP_DP))
@@ -213,51 +495,148 @@ class PageButtonsPlugin(BasePlugin):
         lv.stopScroll()
         lv.smoothScrollBy(0, direction * page)
         _log("page %s by %d px" % ("up" if direction < 0 else "down", page))
+        return True
 
-    def _update(self, st):
-        lv = get_private_field(st.chat, "chatListView")
-        if lv is None:
+    def _go_top(self, chat):
+        """Straight to the first message of the chat or topic: stock jump to date with the
+        earliest possible date, so only the page around that message is loaded."""
+        try:
+            set_private_field(chat, "wasManualScroll", True)
+            lv = get_private_field(chat, "chatListView")
+            if lv is not None:
+                lv.stopScroll()
+            ends = get_private_field(chat, "endReached")
+            at_start = ends is not None and bool(ends[0])
+            chat.jumpToDate(1)
+            _log("go to top%s" % ("" if at_start else " (loading the start)"))
+            if not at_start:
+                # the start was not loaded yet: stock loaded the page around it; once that
+                # load is in, jump once more so the first message itself is in view
+                self.handler.postDelayed(_Once(lambda c=chat, n=0: self._top_after_load(c, n)), 250)
+        except Exception as e:
+            _log("go top: %s" % e)
+
+    def _top_after_load(self, chat, n):
+        """Bounded follow up after a top tap (at most 24 checks, 6 s): once stock has loaded the
+        page around the start, show its oldest message, the first one of the chat or topic."""
+        try:
+            waiting = get_private_field(chat, "waitingForLoad")
+            busy = bool(get_private_field(chat, "loading")) or (waiting is not None and not waiting.isEmpty())
+            if not busy and n >= 1:
+                msgs = get_private_field(chat, "messages")
+                for i in range(int(msgs.size()) - 1, -1, -1):
+                    m = msgs.get(i)
+                    if int(m.getId()) > 0:
+                        chat.scrollToMessageId(int(m.getId()), 0, False, 0, True, 0)
+                        _log("top: first loaded message shown")
+                        return
+                return
+            if n < 24:
+                self.handler.postDelayed(_Once(lambda c=chat, k=n + 1: self._top_after_load(c, k)), 250)
+        except Exception as e:
+            _log("top after load: %s" % e)
+
+    def _pick_date(self, chat):
+        """Long press on top: the stock calendar from search, then stock jump to date."""
+        try:
+            act = chat.getParentActivity()
+            if act is None:
+                return True
+            td = get_private_field(chat, "themeDelegate")
+            cb = _DatePicked(lambda d, c=chat: c.jumpToDate(int(d)))
+            chat.showDialog(AlertsCreator.createCalendarPickerDialog(act, 1375315200000, cb, td).create())
+        except Exception as e:
+            _log("pick date: %s" % e)
+        return True
+
+    def _line_icon(self, btn, icon, line_above):
+        """Arrow plus a short line (above for top, below for end) on a round button."""
+        inner = get_private_field(btn, "buttonView")
+        img = get_private_field(inner, "imageView") if inner is not None else None
+        if img is None:
             return
-        mode = int(get_private_field(st.chat, "chatMode") or 0)
-        show = mode != MODE_SEARCH and bool(self.get_setting("enabled", True))
-        self._want(st, "up", show and bool(lv.canScrollVertically(-1)))
-        self._want(st, "down", show and bool(lv.canScrollVertically(1)))
+        ctx = btn.getContext()
+        res, named = self._icon(icon)
+        arrow = ctx.getDrawable(res).mutate()
+        aw, ah = int(arrow.getIntrinsicWidth()), int(arrow.getIntrinsicHeight())
+        line = GradientDrawable()
+        line.setShape(GradientDrawable.RECTANGLE)
+        line.setColor(-1)
+        line.setCornerRadius(float(dp(1)))
+        ld = LayerDrawable(jarray(Drawable)([arrow, line]))
+        ld.setLayerSize(0, aw, ah)
+        ld.setLayerSize(1, int(aw * 0.55), dp(2))
+        if line_above:
+            ld.setLayerGravity(0, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL)
+            ld.setLayerInsetBottom(0, dp(1))
+            ld.setLayerGravity(1, Gravity.TOP | Gravity.CENTER_HORIZONTAL)
+            ld.setLayerInsetTop(1, dp(3))
+        else:
+            ld.setLayerGravity(0, Gravity.TOP | Gravity.CENTER_HORIZONTAL)
+            ld.setLayerInsetTop(0, dp(1))
+            ld.setLayerGravity(1, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL)
+            ld.setLayerInsetBottom(1, dp(3))
+        img.setImageDrawable(ld)
+        img.setScaleType(jclass("android.widget.ImageView$ScaleType").CENTER)
+        try:
+            inner.updateColors()
+        except Exception:
+            pass
 
-    def _want(self, st, which, show):
-        if st.want[which] == show:
+    def _end_icon(self, holder):
+        """Arrow with a line under it on the stock end button, once per button."""
+        btn = holder.button
+        key = int(btn.hashCode())
+        if key in self.end_icons:
             return
-        st.want[which] = show
-        old = st.anim[which]
-        if old is not None:
-            old.cancel()
-        anim = ValueAnimator.ofFloat(float(st.vis[which]), 1.0 if show else 0.0)
-        anim.setDuration(280)
+        self.end_icons.add(key)
+        self._line_icon(btn, "msg_go_down", False)
 
-        def step(v, s=st, w=which):
-            s.vis[w] = v
-            self._place(s)
-
-        anim.addUpdateListener(_Updater(step))
-        st.anim[which] = anim
-        anim.start()
+    def _is_enabled(self):
+        now = time.monotonic()
+        if now - self.enabled_t > 0.5:
+            self.enabled_t = now
+            self.enabled = bool(self.get_setting("enabled", True))
+        return self.enabled
 
     def _place(self, st):
-        """Stack the two buttons above the visible stock buttons, like stock stacks its own."""
-        total = 0.0
-        holders = get_private_field(st.layout, "buttonHolders")
+        """Page up and down sit right above the end button, always visible, in fixed places;
+        the other stock buttons (mentions, reactions) stack above all three."""
+        holders = st.holders
+        if holders is None:
+            holders = get_private_field(st.layout, "buttonHolders")
+            st.holders = holders
+        base = 0.0
+        end_vis = 0.0
         if holders is not None:
-            for h in holders:
-                if h is None:
-                    continue
-                vis = float(h.visibilityAnimator.getFloatValue())
-                cvis = float(h.counterVisibilityAnimator.getFloatValue())
-                total += (dp(44) + dp(10 + 10 * cvis)) * vis
-        for which in ("down", "up"):
+            h0 = holders[0]
+            if h0 is not None:
+                v = float(h0.visibilityAnimator.getFloatValue())
+                c = float(h0.counterVisibilityAnimator.getFloatValue())
+                base = (dp(44) + dp(10 + 10 * c)) * v
+            h1 = holders[BUTTON_PAGE_DOWN]
+            if h1 is not None:
+                try:
+                    self._end_icon(h1)
+                except Exception as e:
+                    _log("end icon: %s" % e)
+                end_vis = float(h1.visibilityAnimator.getFloatValue())
+                c = float(h1.counterVisibilityAnimator.getFloatValue())
+                base += (dp(44) + dp(10 + 10 * c)) * end_vis
+        shown = st.show and self._is_enabled()
+        step = dp(STEP_DP) if shown else 0
+        y = base
+        for which in ("down", "up", "top"):
             b = st.btn[which]
-            v = float(st.vis[which])
-            b.setVisibility(View.VISIBLE if v > 0 else View.GONE)
-            b.setAlpha(v)
-            b.setScaleX(_lerp(0.7, 1.0, v))
-            b.setScaleY(_lerp(0.7, 1.0, v))
-            b.setTranslationY(float(dp(80) * (1.0 - v) - total))
-            total += (dp(44) + dp(10)) * v
+            b.setVisibility(View.VISIBLE if shown else View.GONE)
+            b.setAlpha(1.0)
+            b.setScaleX(1.0)
+            b.setScaleY(1.0)
+            b.setTranslationY(float(-y))
+            y += step
+        extra = 3 * step
+        if holders is not None and extra > 0:
+            for i in range(2, len(holders)):
+                h = holders[i]
+                if h is not None:
+                    h.button.setTranslationY(float(h.button.getTranslationY() - extra))
