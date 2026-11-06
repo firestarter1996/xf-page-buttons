@@ -1,6 +1,6 @@
 # 💬⬆️⬇️ Page Up Down
 
-A plugin for Nagram XF. Two round buttons in every chat move the messages exactly one screen up or down per tap.
+A plugin for Nagram XF. Round buttons in every chat move the messages exactly one screen up or down per tap, jump to the first message, and can sit on either side of the chat.
 
 ## Why I made it
 
@@ -8,31 +8,33 @@ Long bot replies fill my chats. Flinging overshoots, and the stock button only j
 
 ## What it changes
 
-* A page up button and a page down button sit in the chat's side button column, above the stock scroll to bottom button, in the same round style.
-* Each tap moves the messages one screen, minus a small overlap so the line you were reading stays in view.
-* Page up shows only when there are older messages above. Page down shows only when there are newer messages below. They fade in and out like the stock buttons and move out of their way.
+* Page up and page down buttons sit in the chat's side button column, above the stock scroll to bottom button, in the same round style.
+* Each tap moves the messages one screen, minus a small overlap so the line you were reading stays in view. Hold a button to keep paging.
+* A top button jumps straight to the first message of the chat or topic. Hold it to pick a date.
+* The stock end button gets an arrow with a line under it and always goes to the very bottom of the newest message.
+* All four buttons stay in fixed places. Mention and reaction buttons stack above them.
 * Works in private chats, groups, channels and forum topics.
 
-Setting: the buttons can be switched off. Reopen a chat after changing it.
+## Swap buttons position
+
+Off by default. On moves the whole button column to the left edge and mirrors the chat: your messages on the left, everyone else on the right, sender pictures on the right edge.
+
+Since 1.3.2 no button ever covers a bubble. Bubbles that stock gives the full width (your own, and everyone's in private chats) are narrowed by the same 52 dp stock takes from group bubbles for the sender picture, and every bubble starts to the right of the button column and ends before the right edge or the sender pictures. With the switch off nothing changes.
 
 ## Install
 
 1. Use the plugin build of Nagram XF and turn on the plugin engine (Settings, N Settings, Plugins).
 2. Download `page_buttons.plugin` from the latest release.
 3. Send it to your Saved Messages, tap it and choose install. You can also use the plus button on the Plugins screen.
-4. Make sure Page Up Down is switched on.
+4. Make sure Page Up Down is switched on. Reopen a chat after changing a setting.
 
 ## How it works
 
-The plugin hooks `ChatActivity.createView` and `onResume` and adds two `ChatActivityBlurredRoundPageDownButton` buttons to the chat's `sideControlsButtonsLayout`. It hooks `checkButtonsPositionsAndVisibility` to stack them above whatever stock buttons are showing, and the chat list's scroll listener to show each button only when `canScrollVertically` says that direction can move. A tap calls `smoothScrollBy` with the visible message area minus the top bar, the bottom bar and a 96 dp overlap. Every page move goes to logcat under the tag `PageButtons`.
+The plugin hooks `ChatActivity.createView` and `onResume` and adds its buttons to the chat's `sideControlsButtonsLayout`, and hooks `checkButtonsPositionsAndVisibility` to keep them stacked in fixed places. A page tap scrolls by the visible message area minus the bars and an overlap. Swap mode moves each message cell once in `ChatMessageCell.onLayout` and narrows full width bubbles in `MessageObject.getMaxMessageTextWidth`, so nothing extra runs while drawing or scrolling. Logcat tag `PageButtons`.
 
 ## Tested
 
-Nagram XF 12.10.1 plugin build, plugin SDK 1.4.6.7, on a Pixel 6 Pro running the same build and settings as my daily phone, in a forum topic holding 41 long bot replies.
-
-* At the bottom only page up showed. One tap moved the view from replies 39 and 40 to replies 36 through 38, and page down appeared.
-* One tap on page down brought the view back to the exact same spot, and page down hid again.
-* Fifteen taps on page up reached the first message of the topic, and page up hid there.
+Nagram XF 12.10.1 plugin build on a Pixel 6 Pro running the same build and settings as my daily phone, in a busy forum topic with long bot replies and long messages of my own. With swap on, the buttons end about 50 dp from the left edge and every bubble, mine and the bot's, starts past them. With swap off the chat looks exactly like stock.
 
 ## License
 
