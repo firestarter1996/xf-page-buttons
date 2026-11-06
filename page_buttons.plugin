@@ -1,8 +1,8 @@
 __id__ = "page_buttons"
 __name__ = "Page Up Down"
-__description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left and everyone else on the right. Made by [firestarter1996](https://github.com/firestarter1996)."
+__description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left, over the sender pictures column, and starts everyone else's messages just right of the buttons so no message is covered. Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.3.3"
+__version__ = "1.3.4"
 
 # Two round buttons in the same style as the stock "scroll to bottom" button sit
 # right above it in the chat's side button column:
@@ -403,34 +403,17 @@ class PageButtonsPlugin(BasePlugin):
                     br = int(cell.getBackgroundDrawableRight())
                     if br <= bl:
                         return
-                    avatar = vis.getBoolean(cell)
                     out = mo.isOutOwner()
-                    # mirror the bubble BODY (the tail stays on its stock side), so stacked
-                    # bubbles line up on the new side the way they do on the stock side
+                    if out:
+                        return              # your own bubbles stay on the right, stock size and place
+                    # 1.3.4: the chat keeps its stock layout; sender pictures stay in the left column,
+                    # which is what the buttons cover. Other people's bubbles start right of the buttons.
                     tl = 0
                     if not pin_f.getBoolean(cell) and not media_f.getBoolean(cell):
                         tl = tail
-                    body_l = bl + (0 if out else tl)
-                    body_r = br - (tl if out else 0)
-                    ts = pw - (left0 + body_r) - (body_l - bl)   # mirrored bubble left edge on screen
-                    # 1.3.2: never under the button column on the left, never past the right edge
-                    # (or into the sender pictures); widths were already narrowed by the width hook
-                    right_lim = pw - (edge if avatar else gap_r)
-                    ts = min(ts, right_lim - (body_r - bl))
-                    ts = max(ts, gutter - (body_l - bl))
-                    if int(side_f.getInt(cell)) != 0:
-                        # the share button stays beside the bubble, so keep room for it on screen
-                        if out:
-                            ts = max(ts, side_gap)
-                        else:
-                            lim = pw - side_gap - (edge if avatar else 0)
-                            ts = min(ts, lim - (br - bl))
-                    off = ts - (left0 + bl)
-                    if off != 0:
-                        cell.offsetLeftAndRight(off)
-                    if avatar:
-                        # the chat list draws sender pictures in its own coordinates, not the cell's
-                        cell.getAvatarImage().setImageX(float(pw - edge))
+                    body_off = tl                     # incoming tail sits on the left of the body
+                    if left0 + bl + body_off < gutter:
+                        cell.offsetLeftAndRight(gutter - (left0 + bl + body_off))
                 except Exception as e:
                     _log("mirror: %s" % e)
 
@@ -454,7 +437,9 @@ class PageButtonsPlugin(BasePlugin):
                     return
                 try:
                     mo = param.thisObject
-                    if bool(need_av.invoke(mo)) and not mo.isOutOwner() and not mo.messageOwner.isThreadMessage:
+                    if mo.isOutOwner():
+                        return
+                    if bool(need_av.invoke(mo)) and not mo.messageOwner.isThreadMessage:
                         return
                     w = int(param.getResult())
                     if w > narrow * 3:
@@ -463,7 +448,7 @@ class PageButtonsPlugin(BasePlugin):
                     _log("width: %s" % e)
 
         self.hook_method(mo_cls.getDeclaredMethod("getMaxMessageTextWidth"), WidthHook())
-        _log("bubbles mirrored")
+        _log("swap layout on")
 
     def _hold_start(self, rep_run):
         """Long press: page once now (the press already lasted about 400 ms), then repeat."""
