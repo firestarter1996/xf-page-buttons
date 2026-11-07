@@ -1,8 +1,8 @@
 __id__ = "page_buttons"
 __name__ = "Page Up Down"
-__description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left, everyone else on the right and every message clear of the buttons. A switch button above top flips the side with one tap. Made by [firestarter1996](https://github.com/firestarter1996)."
+__description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left, everyone else on the right and every message clear of the buttons and every bubble tail pointing the mirrored way. A switch button above top flips the side with one tap; hold it to hide all the buttons until the topic is opened again. Every button has white arrows and a white ring with a dark edge so it reads in the sun, and fills with your accent blue while pressed. The share button next to messages is hidden. Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.3.5"
+__version__ = "1.4.1"
 
 # Two round buttons in the same style as the stock "scroll to bottom" button sit
 # right above it in the chat's side button column:
@@ -32,11 +32,26 @@ __version__ = "1.3.5"
 # to date does (only the page around that message is loaded, no scrolling through
 # history). Holding it opens the stock calendar to pick a date. No polling, nothing
 # runs until it is tapped.
+# Share button (1.4.0, owner 11-07-2026: "Can you remove the share button? In xf?"): the round share
+# arrow next to messages is gone in both modes (setting on by default). Nagram's own hide share check
+# is switched on in memory (never saved), so nothing runs per message.
+# Tails (1.4.0): with Swap on every bubble tail points the mirrored way: everyone else's toward their
+# picture on the right edge, yours toward the left. The bubble outline is mirrored once when its shape
+# is built (a hook on MessageDrawable.generatePath, which stock caches per cell), nothing per frame.
+# Sunlight look (1.4.1, owner 11-07-2026: "make the highlight colors of the page up down buttons pure
+# White? It's very hard for me to see them in the Sun. Or maybe light blue ... give them a border or
+# two"): every button of the cluster (top, page up, page down, end, switch side) gets pure white
+# arrows, a 2 dp white ring and a 1 dp dark ring outside it, so the circle reads on light and dark
+# backgrounds. While pressed or held, the circle fills with XF's own accent blue (the theme color the
+# topic tabs and other highlighted XF buttons use, read from the theme, never a fixed blue). All of it
+# is static drawables set once per button, so nothing extra runs while drawing.
+# Hide (1.4.1): a long press on the switch side button hides the whole cluster (with a short haptic
+# tick) until the topic or chat is opened again.
 # Logcat tag: PageButtons.
 
 import time
 
-from java import jclass, dynamic_proxy, jarray
+from java import jclass, dynamic_proxy, jarray, jint
 from base_plugin import BasePlugin, MethodHook
 from hook_utils import find_class, get_private_field, set_private_field
 from android_utils import run_on_ui_thread, dp, OnClickListener
@@ -68,9 +83,16 @@ RunnableIface = jclass("java.lang.Runnable")
 IntCallback = jclass("org.telegram.messenger.MessagesStorage$IntCallback")
 AlertsCreator = jclass("org.telegram.ui.Components.AlertsCreator")
 RoundButton = jclass("org.telegram.ui.Components.chat.buttons.ChatActivityBlurredRoundPageDownButton")
+StateListDrawable = jclass("android.graphics.drawable.StateListDrawable")
+InsetDrawable = jclass("android.graphics.drawable.InsetDrawable")
+ColorDrawable = jclass("android.graphics.drawable.ColorDrawable")
+Theme = jclass("org.telegram.ui.ActionBar.Theme")
+Haptic = jclass("android.view.HapticFeedbackConstants")
+CIRCLE_INSET_DP = 6     # the round glass circle sits 6 dp inside the 56 dp button view (44 dp circle)
 
 
 GUTTER_DP = 57
+TAIL_ROUNDING = 0.00001   # > 0 picks the stock outline path; too small to change any corner
 
 
 def _log(msg):
@@ -157,6 +179,7 @@ class _Buttons:
         self.layout = layout
         self.btn = {"top": top, "up": up, "down": down, "side": side}
         self.show = True
+        self.hidden = False
         self.holders = None
 
 
@@ -168,6 +191,8 @@ class PageButtonsPlugin(BasePlugin):
             Switch(key="enabled", text="Show page buttons in chats", default=True,
                    subtext="Up and down buttons that move the messages one screen per tap, and an end arrow with a line under it."),
             Switch(key="swap", text="Swap buttons position", default=False),
+            Switch(key="hide_share", text="Hide the share button", default=True,
+                   subtext="Removes the round share arrow next to messages."),
             Divider(text="Reopen a chat after changing these."),
         ]
 
@@ -179,6 +204,9 @@ class PageButtonsPlugin(BasePlugin):
         self.handler = Handler(Looper.getMainLooper())
         self.avatar_hook = False
         self.side_left = False
+        self.tail_hook = False
+        self.share_orig = None
+        self.hide_share = bool(self.get_setting("hide_share", True))
         # 1.3.0: the Right / Left choice became one switch; an old Left choice turns it on
         try:
             if int(self.get_setting("side", 0) or 0) == 1 and self.get_setting("swap", None) is None:
@@ -222,9 +250,12 @@ class PageButtonsPlugin(BasePlugin):
                 # the stock end button stays visible and never fades in or out
                 try:
                     st = plugin.chats.get(int(param.thisObject.hashCode()))
-                    if st is not None and st.show and int(param.args[0]) == BUTTON_PAGE_DOWN:
-                        param.args[1] = True
-                        param.args[2] = False
+                    if st is not None and int(param.args[0]) == BUTTON_PAGE_DOWN:
+                        if st.hidden:
+                            param.args[1] = False      # the cluster is hidden: the end button too
+                        elif st.show:
+                            param.args[1] = True
+                            param.args[2] = False
                 except Exception as e:
                     _log("show: %s" % e)
 
@@ -262,7 +293,44 @@ class PageButtonsPlugin(BasePlugin):
         # home screen shortcut) gets its buttons when it resumes
         self.hook_method(ca_cls.getDeclaredMethod("onResume"), CreateViewHook())
         self.hook_method(ca_cls.getDeclaredMethod("onFragmentDestroy"), DestroyHook())
+        self.styled = set()        # inner round button views that got the sunlight look
+
+        class ColorsHook(MethodHook):
+            def after_hooked_method(self, param):
+                # stock sets the arrow color again on a theme change: keep it pure white
+                if int(param.thisObject.hashCode()) in plugin.styled:
+                    try:
+                        param.thisObject.setIconColor(-1)
+                    except Exception:
+                        pass
+
+        class TopicHook(MethodHook):
+            def after_hooked_method(self, param):
+                # another topic opened on this screen: a hidden cluster comes back
+                try:
+                    layout = get_private_field(param.thisObject, "sideControlsButtonsLayout")
+                    st = plugin.chats.get(int(layout.hashCode())) if layout is not None else None
+                    if st is not None and st.hidden:
+                        plugin._set_hidden(st, False)
+                except Exception as e:
+                    _log("topic: %s" % e)
+
+        try:
+            rb_cls = find_class("org.telegram.ui.Components.chat.buttons.ChatActivityBlurredRoundButton")
+            self.hook_method(rb_cls.getDeclaredMethod("updateColors"), ColorsHook())
+        except Exception as e:
+            _log("colors hook: %s" % e)
+        try:
+            arr = find_class("java.util.ArrayList")
+            chat_t = find_class("org.telegram.tgnet.TLRPC$Chat")
+            topic_t = find_class("org.telegram.tgnet.TLRPC$TL_forumTopic")
+            int_t2 = jclass("java.lang.Integer").TYPE
+            self.hook_method(ca_cls.getDeclaredMethod("setThreadMessages", arr, chat_t, int_t2, int_t2, int_t2, topic_t), TopicHook())
+        except Exception as e:
+            _log("topic hook: %s" % e)
         self.hook_method(side_cls.getDeclaredMethod("checkButtonsPositionsAndVisibility"), PositionsHook())
+
+        self._apply_share()
         self.log("Page Up Down loaded")
         try:
             from client_utils import get_last_fragment
@@ -272,6 +340,26 @@ class PageButtonsPlugin(BasePlugin):
         except Exception as e:
             _log("open chat at load: %s" % e)
         _log("loaded " + __version__)
+
+    def on_plugin_unload(self):
+        self.hide_share = False
+        self._apply_share()
+
+    def _apply_share(self):
+        """Share button off: stock's own "hide share button" check (it already covers every chat except
+        Saved Messages) is switched on in memory only, never saved, so no hook runs per message and the
+        app's own setting is back as it was once the plugin is off."""
+        try:
+            item = jclass("xyz.nextalone.nagram.NaConfig").INSTANCE.getHideShareButtonInChannel()
+            if self.share_orig is None:
+                self.share_orig = bool(item.Bool())
+            want = True if self.hide_share else self.share_orig
+            if bool(item.Bool()) != want:
+                f = item.getClass().getDeclaredField("value")
+                f.setAccessible(True)
+                f.set(item, jclass("java.lang.Boolean")(want))
+        except Exception as e:
+            _log("share: %s" % e)
 
     # ---- setup ---------------------------------------------------------------
 
@@ -289,10 +377,16 @@ class PageButtonsPlugin(BasePlugin):
         lv = get_private_field(chat, "chatListView")
         if layout is None or lv is None:
             return
-        self._apply_side(layout)
+        self.hide_share = bool(self.get_setting("hide_share", True))
+        self._apply_share()
+        self._apply_side(layout, chat)
         old = self.chats.get(int(layout.hashCode()))
         if old is not None:
             return
+        if self.side_left:
+            # 1.4.0: a chat screen first seen with Swap on (also right after the plugin reloads) lays its
+            # messages out once more, so bubbles laid out before the hooks existed get mirrored too
+            self._relayout(chat)
         # never two pairs: drop any buttons an earlier setup of this screen left behind
         for i in range(layout.getChildCount() - 1, -1, -1):
             child = layout.getChildAt(i)
@@ -341,8 +435,11 @@ class PageButtonsPlugin(BasePlugin):
         b.setPivotY(float(dp(36)))
         b.setContentDescription("Switch button side")
         b.setOnClickListener(OnClickListener(lambda v, c=chat: self._flip_side(c)))
+        b.setOnLongClickListener(_LongClick(lambda bb=b, ly=layout: self._hide_cluster(bb, ly)))
         layout.addView(b, FrameLayoutParams(dp(56), dp(64), gravity))
         st = _Buttons(chat, layout, made["top"], made["up"], made["down"], b)
+        for v in (made["top"], made["up"], made["down"], b):
+            self._sun_look(v, rp)
         mode = int(get_private_field(chat, "chatMode") or 0)
         st.show = mode != MODE_SEARCH
         self.chats[int(layout.hashCode())] = st
@@ -361,7 +458,14 @@ class PageButtonsPlugin(BasePlugin):
             self.set_setting("swap", not bool(self.get_setting("swap", False)))
             layout = get_private_field(chat, "sideControlsButtonsLayout")
             if layout is not None:
-                self._apply_side(layout)
+                self._apply_side(layout, chat)
+            self._relayout(chat)
+        except Exception as e:
+            _log("flip: %s" % e)
+
+    def _relayout(self, chat):
+        """Every message of this screen laid out once more (widths, bubble places, tail shapes)."""
+        try:
             # message widths depend on the side (the width hook), so their text is laid out again
             msgs = get_private_field(chat, "messages")
             if msgs is not None:
@@ -378,12 +482,38 @@ class PageButtonsPlugin(BasePlugin):
                 adapter.notifyDataSetChanged()
             if lv is not None:
                 for i in range(lv.getChildCount()):
-                    lv.getChildAt(i).forceLayout()
+                    child = lv.getChildAt(i)
+                    self._drop_path_cache(child)
+                    child.forceLayout()
                 lv.requestLayout()
         except Exception as e:
-            _log("flip: %s" % e)
+            _log("relayout: %s" % e)
 
-    def _apply_side(self, layout):
+    def _drop_path_cache(self, cell):
+        """Forget the bubble outline stock cached for this cell, so the next draw builds it again."""
+        try:
+            cp = get_private_field(cell, "backgroundCacheParams")
+            if cp is not None:
+                get_private_field(cp, "lastRect").setEmpty()
+        except Exception:
+            pass
+
+    def _tail_drawables(self, chat, left):
+        """Swap on: the chat bubble drawables take the outline path (built once and cached per cell),
+        which the tail hook mirrors; off: back to stock (rounding 0, the stock bitmap bubble)."""
+        keys = ("drawableMsgIn", "drawableMsgInSelected", "drawableMsgInMedia", "drawableMsgInMediaSelected",
+                "drawableMsgOut", "drawableMsgOutSelected", "drawableMsgOutMedia", "drawableMsgOutMediaSelected")
+        theme = jclass("org.telegram.ui.ActionBar.Theme")
+        md_cls = find_class("org.telegram.ui.ActionBar.MessageDrawable")
+        seen = set()
+        for k in keys:
+            for d in (theme.getThemeDrawable(k), chat.getThemedDrawable(k) if chat is not None else None):
+                if d is None or not md_cls.isInstance(d) or int(d.hashCode()) in seen:
+                    continue
+                seen.add(int(d.hashCode()))
+                d.setRoundingRadius(TAIL_ROUNDING if left else 0.0)
+
+    def _apply_side(self, layout, chat=None):
         """Right (stock) or Left edge for the whole side button column; once per chat setup or resume."""
         try:
             left = bool(self.get_setting("swap", False))
@@ -397,8 +527,63 @@ class PageButtonsPlugin(BasePlugin):
                 layout.setLayoutParams(lp)
             if left and not self.avatar_hook:
                 self._hook_avatars()
+            if left and not self.tail_hook:
+                self._hook_tails()
+            if self.tail_hook:
+                self._tail_drawables(chat, left)
         except Exception as e:
             _log("side: %s" % e)
+
+    def _hook_tails(self):
+        """Swap on: each bubble outline is mirrored when stock builds it, so the tail points the other
+        way, then moved back by the tail width so the bubble body stays exactly under its text. Stock
+        builds an outline only when a cell's bubble size changes; the result is cached per cell."""
+        self.tail_hook = True
+        md_cls = find_class("org.telegram.ui.ActionBar.MessageDrawable")
+        out_f = md_cls.getDeclaredField("isOut")
+        out_f.setAccessible(True)
+        type_f = md_cls.getDeclaredField("currentType")
+        type_f.setAccessible(True)
+        Matrix = jclass("android.graphics.Matrix")
+        shift = float(dp(6))
+        bmp_w = dp(50) + 2
+        bmp_h = dp(40) + 2
+        m = Matrix()
+        plugin = self
+
+        class TailHook(MethodHook):
+            def after_hooked_method(self, param):
+                if not plugin.side_left:
+                    return
+                try:
+                    d = param.thisObject
+                    t = int(type_f.getInt(d))
+                    if t == 2:          # theme previews stay stock
+                        return
+                    b = param.args[1]
+                    if int(b.left) <= 0 and int(b.width()) <= bmp_w and int(b.height()) <= bmp_h:
+                        return          # stock's cached bitmap bubble (not used while Swap is on)
+                    dx = 0.0
+                    if t == 0:          # text bubble: keep the body in place, the tail moves across
+                        dx = -shift if out_f.getBoolean(d) else shift
+                    m.reset()
+                    m.setScale(-1.0, 1.0)
+                    m.postTranslate(float(int(b.left) + int(b.right)) + dx, 0.0)
+                    param.args[0].transform(m)
+                except Exception as e:
+                    _log("tail: %s" % e)
+
+        try:
+            path_cls = find_class("android.graphics.Path")
+            rect_cls = find_class("android.graphics.Rect")
+            int_t = jclass("java.lang.Integer").TYPE
+            bool_t = jclass("java.lang.Boolean").TYPE
+            meth = md_cls.getDeclaredMethod("generatePath", path_cls, rect_cls, int_t, int_t, int_t, int_t, int_t,
+                                            bool_t, bool_t, bool_t)
+            self.hook_method(meth, TailHook())
+        except Exception as e:
+            self.tail_hook = False
+            _log("tail hook: %s" % e)
 
     def _hook_avatars(self):
         """Swap on: every message bubble is mirrored across the chat, so your bubbles sit on the left,
@@ -418,7 +603,7 @@ class PageButtonsPlugin(BasePlugin):
         edge = dp(48)
         gutter = dp(GUTTER_DP)
         gap_r = dp(8)
-        side_gap = dp(48)
+        side_gap = dp(40)
         plugin = self
 
         class LayoutHook(MethodHook):
@@ -441,26 +626,28 @@ class PageButtonsPlugin(BasePlugin):
                         return
                     avatar = vis.getBoolean(cell)
                     out = mo.isOutOwner()
-                    # mirror the bubble BODY (the tail stays on its stock side), so stacked
-                    # bubbles line up on the new side the way they do on the stock side
+                    # mirror the bubble BODY; since 1.4.0 the tail is mirrored too (the tail hook), so it
+                    # sits right of everyone else's bubbles (toward their picture) and left of yours
                     tl = 0
                     if not pin_f.getBoolean(cell) and not media_f.getBoolean(cell):
                         tl = tail
                     body_l = bl + (0 if out else tl)
                     body_r = br - (tl if out else 0)
                     ts = pw - (left0 + body_r) - (body_l - bl)   # mirrored bubble left edge on screen
+                    # what is drawn, relative to the bubble left: the body plus its mirrored tail, and a
+                    # stock side button (comments, go to message) 8 + 32 dp beside it
+                    vis_l = (body_l - bl) - (tl if out else 0)
+                    vis_r = (body_r - bl) + (0 if out else tl)
+                    if int(side_f.getInt(cell)) != 0:
+                        if out:
+                            vis_l = min(vis_l, -side_gap)
+                        else:
+                            vis_r = max(vis_r, (br - bl) + side_gap)
                     # 1.3.2: never under the button column on the left, never past the right edge
                     # (or into the sender pictures); widths were already narrowed by the width hook
                     right_lim = pw - (edge if avatar else gap_r)
-                    ts = min(ts, right_lim - (body_r - bl))
-                    ts = max(ts, gutter - (body_l - bl))
-                    if int(side_f.getInt(cell)) != 0:
-                        # the share button stays beside the bubble, so keep room for it on screen
-                        if out:
-                            ts = max(ts, side_gap)
-                        else:
-                            lim = pw - side_gap - (edge if avatar else 0)
-                            ts = min(ts, lim - (br - bl))
+                    ts = min(ts, right_lim - vis_r)
+                    ts = max(ts, gutter - vis_l)
                     off = ts - (left0 + bl)
                     if off != 0:
                         cell.offsetLeftAndRight(off)
@@ -644,6 +831,71 @@ class PageButtonsPlugin(BasePlugin):
             return
         self.end_icons.add(key)
         self._line_icon(btn, "msg_go_down", False)
+        try:
+            self._sun_look(btn, get_private_field(btn, "resourcesProvider"))
+        except Exception as e:
+            _log("end look: %s" % e)
+
+    def _sun_look(self, btn, rp):
+        """White arrows, a white ring with a dark ring outside it, and an accent blue fill while pressed."""
+        try:
+            inner = get_private_field(btn, "buttonView")
+            if inner is None or int(inner.hashCode()) in self.styled:
+                return
+            self.styled.add(int(inner.hashCode()))
+            inset = dp(CIRCLE_INSET_DP)
+            k = Theme.key_featuredStickers_addButton
+            accent = int(Theme.getColor(k, rp) if rp is not None else Theme.getColor(k))
+            fill = GradientDrawable()
+            fill.setShape(GradientDrawable.OVAL)
+            fill.setColor(accent)
+            pressed = StateListDrawable()
+            pressed.addState(jarray(jint)([16842919]), InsetDrawable(fill, inset))   # android.R.attr.state_pressed
+            pressed.addState(jarray(jint)([]), ColorDrawable(0))
+            # the fill sits under the arrow: a view at the bottom of the button's children
+            under = View(inner.getContext())
+            under.setBackground(pressed)
+            under.setDuplicateParentStateEnabled(True)
+            inner.setDuplicateParentStateEnabled(True)
+            inner.addView(under, 0, FrameLayoutParams(-1, -1))
+            white = GradientDrawable()
+            white.setShape(GradientDrawable.OVAL)
+            white.setColor(0)
+            white.setStroke(dp(2), -1)
+            dark = GradientDrawable()
+            dark.setShape(GradientDrawable.OVAL)
+            dark.setColor(0)
+            dark.setStroke(dp(1), jint(0xCC000000 - 0x100000000))
+            rings = LayerDrawable(jarray(Drawable)([dark, white]))
+            # each ring placed on its own (an InsetDrawable layer would push the next layer in by its padding)
+            o = inset - dp(1)
+            rings.setLayerInset(0, o, o, o, o)
+            rings.setLayerInset(1, inset, inset, inset, inset)
+            inner.setForeground(rings)
+            inner.setIconColor(-1)
+        except Exception as e:
+            _log("look: %s" % e)
+
+    def _hide_cluster(self, btn, layout):
+        """Long press on switch side: the whole cluster goes away until the topic is opened again."""
+        st = self.chats.get(int(layout.hashCode()))
+        if st is None:
+            return True
+        try:
+            btn.performHapticFeedback(Haptic.KEYBOARD_TAP)
+        except Exception:
+            pass
+        self._set_hidden(st, True)
+        return True
+
+    def _set_hidden(self, st, hidden):
+        st.hidden = hidden
+        st.show = not hidden
+        try:
+            st.layout.showButton(BUTTON_PAGE_DOWN, not hidden, True)
+        except Exception as e:
+            _log("hide end: %s" % e)
+        self._place(st)
 
     def _is_enabled(self):
         now = time.monotonic()
