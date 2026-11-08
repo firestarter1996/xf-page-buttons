@@ -2,7 +2,7 @@ __id__ = "page_buttons"
 __name__ = "Page Up Down"
 __description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left, everyone else on the right and every message clear of the buttons and every bubble tail pointing the mirrored way. A switch button above top flips the side with one tap; hold it to hide all the buttons until the topic is opened again. Every button has white arrows and a white ring with a dark edge so it reads in the sun, and fills with your accent blue while pressed. The share button next to messages is hidden. Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 
 # Two round buttons in the same style as the stock "scroll to bottom" button sit
 # right above it in the chat's side button column:
@@ -47,6 +47,14 @@ __version__ = "1.4.1"
 # is static drawables set once per button, so nothing extra runs while drawing.
 # Hide (1.4.1): a long press on the switch side button hides the whole cluster (with a short haptic
 # tick) until the topic or chat is opened again.
+# 1.4.2 (11-08-2026, XF force closed right after start on 11-07): the plugin defined two Runnable
+# classes of its own (_Repeat, _Once) and a long click class when it was imported. Chaquopy maps every
+# Python Runnable to one shared Java proxy class and registers each new Python class for it before the
+# class is finished, so another plugin's Runnable that ran at that moment was rebuilt through the half
+# built class ("'_Repeat' object has no attribute '_chaquopyGetDict'") and the app died. Now every
+# Runnable and long click listener is the SDK's own (built before any plugin runs), each run is kept
+# while it is posted and removed on unload, nothing posted can raise into Java, and the hooks are
+# installed on the UI thread so a message cell being laid out never meets a half installed hook.
 # Logcat tag: PageButtons.
 
 import time
@@ -54,7 +62,7 @@ import time
 from java import jclass, dynamic_proxy, jarray, jint
 from base_plugin import BasePlugin, MethodHook
 from hook_utils import find_class, get_private_field, set_private_field
-from android_utils import run_on_ui_thread, dp, OnClickListener
+from android_utils import run_on_ui_thread, dp, OnClickListener, OnLongClickListener, R
 from ui.settings import Header, Switch, Divider, Selector
 
 LOG_TAG = "PageButtons"
@@ -125,41 +133,39 @@ class _Touch(dynamic_proxy(OnTouchIface)):
         return False   # the button still gets the event, so a tap stays a tap
 
 
-class _LongClick(dynamic_proxy(OnLongClickIface)):
-    def __init__(self, fn):
-        super().__init__()
-        self.fn = fn
+def _LongClick(fn):
+    """The SDK's long click listener; an error is logged, never raised into Java."""
+    def call(view):
+        try:
+            return bool(fn())
+        except Exception as e:
+            _log("long click: %s" % e)
+            return False
+    return OnLongClickListener(call)
 
-    def onLongClick(self, view):
-        return bool(self.fn())
 
-
-class _Repeat(dynamic_proxy(RunnableIface)):
-    """One page per run while the button is held; reposts itself only while held."""
+class _Repeat:
+    """One page per run while the button is held; reposts itself only while held. The Java
+    Runnable is the SDK's R, made once per button and kept, so the same object is reposted."""
 
     def __init__(self, plugin, chat, direction):
-        super().__init__()
         self.plugin = plugin
         self.chat = chat
         self.direction = direction
         self.held = False
+        self.runnable = R(self.run)
 
     def run(self):
-        if not self.held:
-            return
-        if not self.plugin._page(self.chat, self.direction):
-            self.held = False   # top or bottom reached
-            return
-        self.plugin.handler.postDelayed(self, REPEAT_MS)
-
-
-class _Once(dynamic_proxy(RunnableIface)):
-    def __init__(self, fn):
-        super().__init__()
-        self.fn = fn
-
-    def run(self):
-        self.fn()
+        try:
+            if not self.held or not self.plugin.alive:
+                return
+            if not self.plugin._page(self.chat, self.direction):
+                self.held = False   # top or bottom reached
+                return
+            self.plugin.handler.postDelayed(self.runnable, REPEAT_MS)
+        except Exception as e:
+            self.held = False
+            _log("repeat: %s" % e)
 
 
 class _DatePicked(dynamic_proxy(IntCallback)):
@@ -197,11 +203,47 @@ class PageButtonsPlugin(BasePlugin):
         ]
 
     def on_plugin_load(self):
+        self.alive = True
+        self.loaded = False
+        self.handler = Handler(Looper.getMainLooper())
+        self.onces = set()         # posted one shot runs, kept until they run, removed on unload
+        self.repeats = []          # every held button's repeat run, removed on unload
+        self.install_run = None
+        if Looper.myLooper() == Looper.getMainLooper():
+            self._install()
+        else:
+            self.install_run = R(self._install)
+            self.handler.post(self.install_run)
+
+    def _install(self):
+        try:
+            if self.alive:
+                self._load()
+                self.loaded = True
+        except Exception as e:
+            _log("install: %s" % e)
+
+    def _post_once(self, fn, delay):
+        """fn once on the UI thread after delay ms; the run is kept while posted."""
+        box = []
+
+        def run():
+            try:
+                self.onces.discard(box[0])
+                if self.alive:
+                    fn()
+            except Exception as e:
+                _log("once: %s" % e)
+        r = R(run)
+        box.append(r)
+        self.onces.add(r)
+        self.handler.postDelayed(r, int(delay))
+
+    def _load(self):
         self.chats = {}            # side buttons layout hash -> _Buttons
         self.end_icons = set()     # stock end buttons that already got the new icon
         self.enabled_t = 0.0
         self.enabled = True
-        self.handler = Handler(Looper.getMainLooper())
         self.avatar_hook = False
         self.side_left = False
         self.tail_hook = False
@@ -336,12 +378,27 @@ class PageButtonsPlugin(BasePlugin):
             from client_utils import get_last_fragment
             frag = get_last_fragment()
             if frag is not None and "ChatActivity" in str(frag.getClass().getName()):
-                run_on_ui_thread(lambda f=frag: self._setup(f))
+                self._post_once(lambda f=frag: self._setup(f), 0)
         except Exception as e:
             _log("open chat at load: %s" % e)
         _log("loaded " + __version__)
 
     def on_plugin_unload(self):
+        self.alive = False
+        try:
+            if self.install_run is not None:
+                self.handler.removeCallbacks(self.install_run)
+            for r in list(self.onces):
+                self.handler.removeCallbacks(r)
+            self.onces.clear()
+            for rep in self.repeats:
+                rep.held = False
+                self.handler.removeCallbacks(rep.runnable)
+            self.repeats = []
+        except Exception as e:
+            _log("unload: %s" % e)
+        if not self.loaded:
+            return
         self.hide_share = False
         self._apply_share()
 
@@ -409,6 +466,9 @@ class PageButtonsPlugin(BasePlugin):
             direction = -1 if which == "up" else 1
             b.setOnClickListener(OnClickListener(lambda v, c=chat, d=direction: self._page(c, d)))
             rep_run = _Repeat(self, chat, direction)
+            self.repeats.append(rep_run)
+            if len(self.repeats) > 40:
+                del self.repeats[:20]   # old chats' buttons; their runs are not posted any more
             b.setOnLongClickListener(_LongClick(lambda r=rep_run: self._hold_start(r)))
             b.setOnTouchListener(_Touch(lambda action, r=rep_run: self._hold_touch(r, action)))
             layout.addView(b, FrameLayoutParams(dp(56), dp(64), gravity))
@@ -707,7 +767,7 @@ class PageButtonsPlugin(BasePlugin):
 
     def _hold_start(self, rep_run):
         """Long press: page once now (the press already lasted about 400 ms), then repeat."""
-        self.handler.removeCallbacks(rep_run)
+        self.handler.removeCallbacks(rep_run.runnable)
         rep_run.held = True
         rep_run.run()
         return True   # consumed, so letting go does not add a tap page
@@ -716,7 +776,7 @@ class PageButtonsPlugin(BasePlugin):
         if action in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
             if rep_run.held:
                 rep_run.held = False
-                self.handler.removeCallbacks(rep_run)
+                self.handler.removeCallbacks(rep_run.runnable)
 
     def _page(self, chat, direction):
         """One screen up (-1) or down (1). False when the list cannot move that way."""
@@ -752,7 +812,7 @@ class PageButtonsPlugin(BasePlugin):
             if not at_start:
                 # the start was not loaded yet: stock loaded the page around it; once that
                 # load is in, jump once more so the first message itself is in view
-                self.handler.postDelayed(_Once(lambda c=chat, n=0: self._top_after_load(c, n)), 250)
+                self._post_once(lambda c=chat, n=0: self._top_after_load(c, n), 250)
         except Exception as e:
             _log("go top: %s" % e)
 
@@ -772,7 +832,7 @@ class PageButtonsPlugin(BasePlugin):
                         return
                 return
             if n < 24:
-                self.handler.postDelayed(_Once(lambda c=chat, k=n + 1: self._top_after_load(c, k)), 250)
+                self._post_once(lambda c=chat, k=n + 1: self._top_after_load(c, k), 250)
         except Exception as e:
             _log("top after load: %s" % e)
 
