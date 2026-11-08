@@ -26,6 +26,10 @@ No button ever covers a message. Every bubble, yours and everyone else's, with o
 
 A switch side button sits above the top button. One tap flips the column between right and left: the setting is saved and the open chat is laid out once on the new side.
 
+## What's new in 1.4.2 (11-08-2026)
+
+Fixes Nagram XF force closing right after it opened. The plugin defined its own Runnable and long click classes while it loaded, and Chaquopy points the shared Java class for every Python Runnable at the newest Python class before that class is finished. Another plugin's Runnable that ran in that moment was rebuilt through the unfinished class and the app died with `AttributeError: '_Repeat' object has no attribute '_chaquopyGetDict'`. Every Runnable and long click listener is now the SDK's own, each posted run is kept until it runs and removed on unload, nothing posted can raise into Java, and the hooks are installed on the UI thread.
+
 ## Install
 
 1. Use the plugin build of Nagram XF and turn on the plugin engine (Settings, N Settings, Plugins).
