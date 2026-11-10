@@ -16,6 +16,7 @@ Long bot replies fill my chats. Flinging overshoots, and the stock button only j
 * The round share arrow next to messages is hidden (a setting, on by default).
 * Hold the switch side button to hide all the buttons until the topic or chat is opened again (a short tick, no popup).
 * Easy to see in the sun: white arrows, a white ring with a thin dark edge around every button, and a fill in your theme's accent blue while a button is pressed.
+* Every tap on top, page up, page down, end and switch side, and every tap on a topic tab, gives one very short haptic tick, the same key press tick Gboard uses by default. It follows the system touch feedback setting and Nagram's Disable vibration switch.
 * Works in private chats, groups, channels and forum topics.
 
 ## Swap buttons position
@@ -25,6 +26,10 @@ Off by default. On moves the whole button column to the left edge and mirrors th
 No button ever covers a message. Every bubble, yours and everyone else's, with or without a picture, albums and stickers included, starts to the right of the button column. Service messages and dates center in the space beside the buttons. With the switch off nothing changes.
 
 A switch side button sits above the top button. One tap flips the column between right and left: the setting is saved and the open chat is laid out once on the new side.
+
+## What's new in 1.4.3 (11-10-2026)
+
+A very short haptic tick on every tap of the top, page up, page down, end and switch side buttons, and on every tap of a topic tab when you switch topics. It is Android's keyboard key press tick (`HapticFeedbackConstants.KEYBOARD_TAP`), the same feel as Gboard's default, played on the tapped view, so it follows the system touch feedback setting and Nagram's own Disable vibration switch. The tick lives only in the click handlers: nothing new runs while drawing, laying out or scrolling. Holding a page button to keep paging and the long presses work as before.
 
 ## What's new in 1.4.2 (11-08-2026)
 
@@ -39,7 +44,7 @@ Fixes Nagram XF force closing right after it opened. The plugin defined its own 
 
 ## How it works
 
-The plugin hooks `ChatActivity.createView` and `onResume` and adds its buttons to the chat's `sideControlsButtonsLayout`, and hooks `checkButtonsPositionsAndVisibility` to keep them stacked in fixed places. A page tap scrolls by the visible message area minus the bars and an overlap. Swap mode moves each message cell once in `ChatMessageCell.onLayout` (and `ChatActionCell.onLayout` for service messages) and narrows full width bubbles in `MessageObject.getMaxMessageTextWidth`, so nothing extra runs while drawing or scrolling. Tails are flipped by mirroring each bubble outline once in `MessageDrawable.generatePath`, which stock caches per cell. The share arrow is hidden by switching on Nagram's own hide share check in memory only. Logcat tag `PageButtons`.
+The plugin hooks `ChatActivity.createView` and `onResume` and adds its buttons to the chat's `sideControlsButtonsLayout`, and hooks `checkButtonsPositionsAndVisibility` to keep them stacked in fixed places. Taps tick through `performHapticFeedback(KEYBOARD_TAP)` inside each click handler; the stock end button through a hook on `ChatActivity.onSideControlButtonOnClick` and the topic tabs through one on `TopicsTabsView.onTabClick`. A page tap scrolls by the visible message area minus the bars and an overlap. Swap mode moves each message cell once in `ChatMessageCell.onLayout` (and `ChatActionCell.onLayout` for service messages) and narrows full width bubbles in `MessageObject.getMaxMessageTextWidth`, so nothing extra runs while drawing or scrolling. Tails are flipped by mirroring each bubble outline once in `MessageDrawable.generatePath`, which stock caches per cell. The share arrow is hidden by switching on Nagram's own hide share check in memory only. Logcat tag `PageButtons`.
 
 ## Tested
 
