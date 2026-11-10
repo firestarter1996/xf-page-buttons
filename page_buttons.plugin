@@ -1,8 +1,8 @@
 __id__ = "page_buttons"
 __name__ = "Page Up Down"
-__description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left, everyone else on the right and every message clear of the buttons and every bubble tail pointing the mirrored way. A switch button above top flips the side with one tap; hold it to hide all the buttons until the topic is opened again. Every button has white arrows and a white ring with a dark edge so it reads in the sun, and fills with your accent blue while pressed. The share button next to messages is hidden. Made by [firestarter1996](https://github.com/firestarter1996)."
+__description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left, everyone else on the right and every message clear of the buttons and every bubble tail pointing the mirrored way. A switch button above top flips the side with one tap; hold it to hide all the buttons until the topic is opened again. Every button has white arrows and a white ring with a dark edge so it reads in the sun, and fills with your accent blue while pressed. Every tap on these buttons and on a topic tab gives a very short haptic tick, like a keyboard key press. The share button next to messages is hidden. Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.4.2"
+__version__ = "1.4.3"
 
 # Two round buttons in the same style as the stock "scroll to bottom" button sit
 # right above it in the chat's side button column:
@@ -55,6 +55,12 @@ __version__ = "1.4.2"
 # Runnable and long click listener is the SDK's own (built before any plugin runs), each run is kept
 # while it is posted and removed on unload, nothing posted can raise into Java, and the hooks are
 # installed on the UI thread so a message cell being laid out never meets a half installed hook.
+# Haptic tick (1.4.3, owner 11-10-2026: "can you add a very short haptic vibration for each button in
+# page up down? Whatever the default is for gboard." / "And the same for switching topics."): every tap on
+# top, page up, page down, end and switch side, and every tap on a topic tab, calls the tapped view's
+# performHapticFeedback(KEYBOARD_TAP), the system keyboard key press tick Gboard uses by default. It obeys
+# the system touch feedback setting and Nagram's own Disable vibration switch. Only inside the click
+# handlers: nothing on any draw, layout or scroll path, no timer, no logging.
 # Logcat tag: PageButtons.
 
 import time
@@ -106,6 +112,19 @@ TAIL_ROUNDING = 0.00001   # > 0 picks the stock outline path; too small to chang
 def _log(msg):
     try:
         jclass("android.util.Log").i(LOG_TAG, str(msg))
+    except Exception:
+        pass
+
+
+_NO_VIBRATION = []   # Nagram's Disable vibration ConfigItem, looked up once at load
+
+
+def _tick(view):
+    """One very short key press tick on the tapped view (the Gboard default feel)."""
+    try:
+        if _NO_VIBRATION and bool(_NO_VIBRATION[0].Bool()):
+            return
+        view.performHapticFeedback(Haptic.KEYBOARD_TAP)
     except Exception:
         pass
 
@@ -327,6 +346,45 @@ class PageButtonsPlugin(BasePlugin):
                     _log("end: %s" % e)
 
         self.hook_method(ca_cls.getDeclaredMethod("onPageDownClicked"), EndHook())
+        try:
+            del _NO_VIBRATION[:]
+            _NO_VIBRATION.append(jclass("tw.nekomimi.nekogram.NekoConfig").disableVibration)
+        except Exception as e:
+            _log("vibration setting: %s" % e)
+
+        class EndTapHook(MethodHook):
+            def before_hooked_method(self, param):
+                # tick on a real tap of the stock end button (its click handler, not other callers)
+                try:
+                    if int(param.args[0]) == BUTTON_PAGE_DOWN and bool(plugin.get_setting("enabled", True)):
+                        _tick(param.args[1])
+                except Exception:
+                    pass
+
+        class TabTapHook(MethodHook):
+            def before_hooked_method(self, param):
+                # tick on every tap of a topic tab (top row or side column)
+                try:
+                    _tick(param.args[1])
+                except Exception:
+                    pass
+
+        try:
+            view_cls = find_class("android.view.View")
+            self.hook_method(ca_cls.getDeclaredMethod("onSideControlButtonOnClick", jclass("java.lang.Integer").TYPE, view_cls), EndTapHook())
+        except Exception as e:
+            _log("end tap hook: %s" % e)
+        try:
+            tabs_cls = find_class("org.telegram.ui.Components.TopicsTabsView")
+            hooked = 0
+            for m in tabs_cls.getDeclaredMethods():
+                if str(m.getName()) == "onTabClick" and len(m.getParameterTypes()) == 5:
+                    self.hook_method(m, TabTapHook())
+                    hooked += 1
+            if not hooked:
+                _log("tab tap hook: onTabClick not found")
+        except Exception as e:
+            _log("tab tap hook: %s" % e)
         self.hook_method(ca_cls.getDeclaredMethod("createView", ctx_cls), CreateViewHook())
         bool_t = jclass("java.lang.Boolean").TYPE
         int_t = jclass("java.lang.Integer").TYPE
@@ -464,7 +522,7 @@ class PageButtonsPlugin(BasePlugin):
             b.setPivotY(float(dp(36)))
             b.setContentDescription(desc)
             direction = -1 if which == "up" else 1
-            b.setOnClickListener(OnClickListener(lambda v, c=chat, d=direction: self._page(c, d)))
+            b.setOnClickListener(OnClickListener(lambda v, c=chat, d=direction: (_tick(v), self._page(c, d))))
             rep_run = _Repeat(self, chat, direction)
             self.repeats.append(rep_run)
             if len(self.repeats) > 40:
@@ -480,7 +538,7 @@ class PageButtonsPlugin(BasePlugin):
         b.setPivotX(float(dp(28)))
         b.setPivotY(float(dp(36)))
         b.setContentDescription("Go to top")
-        b.setOnClickListener(OnClickListener(lambda v, c=chat: self._go_top(c)))
+        b.setOnClickListener(OnClickListener(lambda v, c=chat: (_tick(v), self._go_top(c))))
         b.setOnLongClickListener(_LongClick(lambda c=chat: self._pick_date(c)))
         layout.addView(b, FrameLayoutParams(dp(56), dp(64), gravity))
         try:
@@ -494,7 +552,7 @@ class PageButtonsPlugin(BasePlugin):
         b.setPivotX(float(dp(28)))
         b.setPivotY(float(dp(36)))
         b.setContentDescription("Switch button side")
-        b.setOnClickListener(OnClickListener(lambda v, c=chat: self._flip_side(c)))
+        b.setOnClickListener(OnClickListener(lambda v, c=chat: (_tick(v), self._flip_side(c))))
         b.setOnLongClickListener(_LongClick(lambda bb=b, ly=layout: self._hide_cluster(bb, ly)))
         layout.addView(b, FrameLayoutParams(dp(56), dp(64), gravity))
         st = _Buttons(chat, layout, made["top"], made["up"], made["down"], b)
