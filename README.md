@@ -17,6 +17,7 @@ Long bot replies fill my chats. Flinging overshoots, and the stock button only j
 * Hold the switch side button to hide all the buttons until the topic or chat is opened again (a short tick, no popup).
 * Easy to see in the sun: white arrows, a white ring with a thin dark edge around every button, and a fill in your theme's accent blue while a button is pressed.
 * Every tap on top, page up, page down, end and switch side, and every tap on a topic tab, gives one very short haptic tick, the same key press tick Gboard uses by default. It follows the system touch feedback setting and Nagram's Disable vibration switch.
+* Space between buttons is a setting: Tight, Roomy (the default), Wide or Extra wide, so a thumb does not land on the wrong button.
 * Works in private chats, groups, channels and forum topics.
 
 ## Swap buttons position
@@ -26,6 +27,10 @@ Off by default. On moves the whole button column to the left edge and mirrors th
 No button ever covers a message. Every bubble, yours and everyone else's, with or without a picture, albums and stickers included, starts to the right of the button column. Service messages and dates center in the space beside the buttons. With the switch off nothing changes.
 
 A switch side button sits above the top button. One tap flips the column between right and left: the setting is saved and the open chat is laid out once on the new side.
+
+## What's new in 1.4.4 (11-11-2026)
+
+A new setting, Space between buttons, with four steps: Tight (the old spacing, 10 dp between circles), Roomy (18 dp, the new default), Wide (26 dp) and Extra wide (36 dp). The end arrow moves apart from page down by the same amount. The value is read at most twice a second, never per frame. Reopen a chat after changing it.
 
 ## What's new in 1.4.3 (11-10-2026)
 

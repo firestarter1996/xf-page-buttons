@@ -2,7 +2,7 @@ __id__ = "page_buttons"
 __name__ = "Page Up Down"
 __description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left, everyone else on the right and every message clear of the buttons and every bubble tail pointing the mirrored way. A switch button above top flips the side with one tap; hold it to hide all the buttons until the topic is opened again. Every button has white arrows and a white ring with a dark edge so it reads in the sun, and fills with your accent blue while pressed. Every tap on these buttons and on a topic tab gives a very short haptic tick, like a keyboard key press. The share button next to messages is hidden. Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.4.3"
+__version__ = "1.4.4"
 
 # Two round buttons in the same style as the stock "scroll to bottom" button sit
 # right above it in the chat's side button column:
@@ -75,6 +75,9 @@ LOG_TAG = "PageButtons"
 MODE_SEARCH = 7
 BUTTON_PAGE_DOWN = 1
 STEP_DP = 54
+# 1.4.4: the setting "Space between buttons" picks the distance from one button to the next (44 dp circles).
+STEP_CHOICES = (54, 62, 70, 80)
+STEP_DEFAULT = 1
 OVERLAP_DP = 96
 REPEAT_FIRST_MS = 400
 REPEAT_MS = 350
@@ -216,6 +219,8 @@ class PageButtonsPlugin(BasePlugin):
             Switch(key="enabled", text="Show page buttons in chats", default=True,
                    subtext="Up and down buttons that move the messages one screen per tap, and an end arrow with a line under it."),
             Switch(key="swap", text="Swap buttons position", default=False),
+            Selector(key="spacing", text="Space between buttons", default=STEP_DEFAULT,
+                     items=["Tight", "Roomy", "Wide", "Extra wide"]),
             Switch(key="hide_share", text="Hide the share button", default=True,
                    subtext="Removes the round share arrow next to messages."),
             Divider(text="Reopen a chat after changing these."),
@@ -262,6 +267,7 @@ class PageButtonsPlugin(BasePlugin):
         self.chats = {}            # side buttons layout hash -> _Buttons
         self.end_icons = set()     # stock end buttons that already got the new icon
         self.enabled_t = 0.0
+        self.step_dp = STEP_CHOICES[STEP_DEFAULT]
         self.enabled = True
         self.avatar_hook = False
         self.side_left = False
@@ -1020,6 +1026,11 @@ class PageButtonsPlugin(BasePlugin):
         if now - self.enabled_t > 0.5:
             self.enabled_t = now
             self.enabled = bool(self.get_setting("enabled", True))
+            try:
+                i = int(self.get_setting("spacing", STEP_DEFAULT) or 0)
+                self.step_dp = STEP_CHOICES[i] if 0 <= i < len(STEP_CHOICES) else STEP_CHOICES[STEP_DEFAULT]
+            except Exception:
+                self.step_dp = STEP_CHOICES[STEP_DEFAULT]
         return self.enabled
 
     def _place(self, st):
@@ -1047,8 +1058,9 @@ class PageButtonsPlugin(BasePlugin):
                 c = float(h1.counterVisibilityAnimator.getFloatValue())
                 base += (dp(44) + dp(10 + 10 * c)) * end_vis
         shown = st.show and self._is_enabled()
-        step = dp(STEP_DP) if shown else 0
-        y = base
+        step = dp(self.step_dp) if shown else 0
+        # the same extra room goes between the end arrow and page down
+        y = base + (dp(self.step_dp - STEP_DP) if shown and base > 0 else 0)
         for which in ("down", "up", "top", "side"):
             b = st.btn[which]
             b.setVisibility(View.VISIBLE if shown else View.GONE)
@@ -1057,7 +1069,7 @@ class PageButtonsPlugin(BasePlugin):
             b.setScaleY(1.0)
             b.setTranslationY(float(-y))
             y += step
-        extra = 4 * step
+        extra = 4 * step + (dp(self.step_dp - STEP_DP) if shown and base > 0 else 0)
         if holders is not None and extra > 0:
             for i in range(2, len(holders)):
                 h = holders[i]
