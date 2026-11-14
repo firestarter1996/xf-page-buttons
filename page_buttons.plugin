@@ -1,8 +1,8 @@
 __id__ = "page_buttons"
 __name__ = "Page Up Down"
-__description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left, everyone else on the right and every message clear of the buttons and every bubble tail pointing the mirrored way. A switch button above top flips the side with one tap; hold it to hide all the buttons until the topic is opened again. Every button has white arrows and a white ring with a dark edge so it reads in the sun, and fills with your accent blue while pressed. Page up is inverted, a white circle with a black arrow, so the button used most stands out. A Height on screen slider moves the whole column up or down. Every tap on these buttons and on a topic tab gives a very short haptic tick, like a keyboard key press. The share button next to messages is hidden. Made by [firestarter1996](https://github.com/firestarter1996)."
+__description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left, everyone else on the right and every message clear of the buttons and every bubble tail pointing the mirrored way. A switch button above top flips the side with one tap; hold it to hide all the buttons until the topic is opened again. Every button has white arrows and a white ring with a dark edge so it reads in the sun, and fills with your accent blue while pressed. Page up is the exact inverse, a white circle with a black ring and a black arrow, so the button used most stands out. A Height on screen slider moves the whole column up or down. Every tap on these buttons and on a topic tab gives a very short haptic tick, like a keyboard key press. The share button next to messages is hidden. Sending a message while you are scrolled up no longer jumps the chat to the bottom (a setting, Jump to bottom after sending, off by default). Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 # Two round buttons in the same style as the stock "scroll to bottom" button sit
 # right above it in the chat's side button column:
@@ -98,9 +98,11 @@ SCALE_DEFAULT = 1.0
 # them up about 5% right now."): "lift" raises the whole column (end, page down, page up, top, switch side, and the
 # mention and reaction buttons above them) by a share of the screen height, so the buttons keep their order and the
 # spacing slider keeps deciding the distance between them. Default 5%. Read with the other settings, at most twice a second.
-LIFT_MIN, LIFT_MAX = 0.0, 40.0
-LIFT_PRESETS = (("⬇️ Lowest", 0), ("👍🏻 Low", 5), ("↕️ Middle", 15), ("⬆️ High", 30))
-LIFT_DEFAULT = 5
+LIFT_MIN, LIFT_MAX = 0.0, 50.0
+# 1.6.1 (owner 11-14-2026: "Move the buttons up another 5%"): default 10, and a saved value rises by 5 once.
+# 1.6.2 (owner 11-14-2026: "Buttons up eight"): default 18, a saved value rises by 8 once, the slider reaches 50.
+LIFT_PRESETS = (("⬇️ Lowest", 0), ("👍🏻 Low", 10), ("↕️ Middle", 18), ("⬆️ High", 30))
+LIFT_DEFAULT = 18
 OVERLAP_DP = 96
 REPEAT_FIRST_MS = 400
 REPEAT_MS = 350
@@ -381,6 +383,8 @@ class PageButtonsPlugin(BasePlugin):
                    subtext="Up and down buttons that move the messages one screen per tap, and an end arrow with a line under it."),
             Switch(key="swap", text="Swap buttons position", default=False),
         ] + self._size_rows() + [
+            Switch(key="jump_on_send", text="Jump to bottom after sending", default=False,
+                   subtext="Off keeps the chat where you were reading when you send a message."),
             Switch(key="hide_share", text="Hide the share button", default=True,
                    subtext="Removes the round share arrow next to messages."),
             Divider(text="Reopen a chat after changing these."),
@@ -510,12 +514,60 @@ class PageButtonsPlugin(BasePlugin):
                     except Exception:
                         pass
                     set_private_field(chat, "forceScrollToMessageBottom", False)
-                    chat.scrollToLastMessage(True, False)
+                    plugin.own_end = True
+                    try:
+                        chat.scrollToLastMessage(True, False)
+                    finally:
+                        plugin.own_end = False
                     param.setResult(None)
                 except Exception as e:
                     _log("end: %s" % e)
 
         self.hook_method(ca_cls.getDeclaredMethod("onPageDownClicked"), EndHook())
+        # 1.7.0 (owner 11-14-2026: "Whenever I transmit a message in XF, it automatically jumps to bottom ... I need a
+        # setting that disables this, and it should be set to off"). XF jumps in two places when one of your own messages
+        # arrives in the open chat (ChatActivity.processNewMessages): (a) the newest messages are loaded: it sets
+        # forceScrollToTop and calls moveScrollToLastMessage(true); (b) they are not loaded (you are far up): it calls
+        # scrollToLastMessage(true, false), which reloads the chat at its end. Both calls are skipped when the setting is
+        # off and the list is scrolled up. Already at the bottom, the chat follows the new message as stock. The hooks run
+        # only when XF is about to jump (never per frame or per scroll).
+        self.own_end = False
+
+        class SendJumpHook(MethodHook):
+            def before_hooked_method(self, param):
+                try:
+                    chat = param.thisObject
+                    if not bool(param.args[0]) or not bool(get_private_field(chat, "forceScrollToTop")):
+                        return
+                    if bool(plugin.get_setting("jump_on_send", False)) or not bool(plugin.get_setting("enabled", True)):
+                        return
+                    if plugin._scrolled_up(chat):
+                        set_private_field(chat, "forceScrollToTop", False)
+                        param.setResult(None)
+                except Exception as e:
+                    _log("send jump: %s" % e)
+
+        class SendReloadHook(MethodHook):
+            def before_hooked_method(self, param):
+                try:
+                    if plugin.own_end or not bool(param.args[0]) or bool(param.args[1]):
+                        return
+                    if bool(plugin.get_setting("jump_on_send", False)) or not bool(plugin.get_setting("enabled", True)):
+                        return
+                    # only the call made for a message of yours that just arrived
+                    for el in jclass("java.lang.Thread").currentThread().getStackTrace()[2:14]:
+                        if str(el.getMethodName()) == "processNewMessages":
+                            param.setResult(None)
+                            return
+                except Exception as e:
+                    _log("send reload: %s" % e)
+
+        try:
+            bt = jclass("java.lang.Boolean").TYPE
+            self.hook_method(ca_cls.getDeclaredMethod("moveScrollToLastMessage", bt), SendJumpHook())
+            self.hook_method(ca_cls.getDeclaredMethod("scrollToLastMessage", bt, bt), SendReloadHook())
+        except Exception as e:
+            _log("send jump hooks: %s" % e)
         try:
             del _NO_VIBRATION[:]
             _NO_VIBRATION.append(jclass("tw.nekomimi.nekogram.NekoConfig").disableVibration)
@@ -626,7 +678,32 @@ class PageButtonsPlugin(BasePlugin):
                 self.enabled_t = 0.0
         except Exception as e:
             _log("size bump 3: %s" % e)
-        _log("loaded %s, size %.2f" % (__version__, self._num("scale", SCALE_DEFAULT, SCALE_MIN, SCALE_MAX)))
+        try:   # 1.6.1, once: 5% of the screen higher than the 1.6.0 place (5 was the 1.6.0 default)
+            if not self.get_setting("lift_up_5", False):
+                cur = self._num("lift", 5, LIFT_MIN, LIFT_MAX)
+                self.set_setting("lift", str(int(round(min(LIFT_MAX, cur + 5)))))
+                self.set_setting("lift_up_5", True)
+                self.enabled_t = 0.0
+        except Exception as e:
+            _log("lift bump: %s" % e)
+        try:   # 1.6.2, once: another 8% of the screen higher (10 was the 1.6.1 default)
+            if not self.get_setting("lift_up_8", False):
+                cur = self._num("lift", 10, LIFT_MIN, LIFT_MAX)
+                self.set_setting("lift", str(int(round(min(LIFT_MAX, cur + 8)))))
+                self.set_setting("lift_up_8", True)
+                self.enabled_t = 0.0
+        except Exception as e:
+            _log("lift bump 8: %s" % e)
+        try:   # 1.6.1, once (owner 11-14-2026: "yes add another 3%")
+            if not self.get_setting("bump_103b", False):
+                cur = self._num("scale", SCALE_DEFAULT, SCALE_MIN, SCALE_MAX)
+                self.set_setting("scale", "%.2f" % min(SCALE_MAX, cur * 1.03))
+                self.set_setting("bump_103b", True)
+                self.enabled_t = 0.0
+        except Exception as e:
+            _log("size bump 3b: %s" % e)
+        _log("loaded %s, size %.2f, height %d" % (__version__, self._num("scale", SCALE_DEFAULT, SCALE_MIN, SCALE_MAX),
+                                                 self._num("lift", LIFT_DEFAULT, LIFT_MIN, LIFT_MAX)))
 
     def on_plugin_unload(self):
         self.alive = False
@@ -655,6 +732,22 @@ class PageButtonsPlugin(BasePlugin):
             _log("unload lift: %s" % e)
         self.hide_share = False
         self._apply_share()
+
+    def _scrolled_up(self, chat):
+        """True when the newest message is not at the bottom edge of the list (the same test stock uses)."""
+        lv = get_private_field(chat, "chatListView")
+        lm = get_private_field(chat, "chatLayoutManager")
+        if lv is None or lm is None:
+            return False
+        pos = int(lm.findFirstVisibleItemPosition())
+        if pos < 0:
+            return False
+        if pos > 1:
+            return True
+        child = lm.findViewByPosition(pos)
+        if child is None:
+            return False
+        return int(child.getBottom()) - int(lv.getMeasuredHeight()) > dp(5)
 
     def _apply_share(self):
         """Share button off: stock's own "hide share button" check (it already covers every chat except
@@ -1184,11 +1277,13 @@ class PageButtonsPlugin(BasePlugin):
             white = GradientDrawable()
             white.setShape(GradientDrawable.OVAL)
             white.setColor(0)
-            white.setStroke(dp(2), -1)
+            # 1.6.1 (owner 11-14-2026: "The page up button also needs a circle border to be a perfect inverted parody
+            # of the other buttons"): inverted, the 2 dp ring is pure black and the 1 dp edge outside it is white
+            white.setStroke(dp(2), -16777216 if invert else -1)
             dark = GradientDrawable()
             dark.setShape(GradientDrawable.OVAL)
             dark.setColor(0)
-            dark.setStroke(dp(1), jint(0xCC000000 - 0x100000000))
+            dark.setStroke(dp(1), jint(0xCCFFFFFF - 0x100000000) if invert else jint(0xCC000000 - 0x100000000))
             rings = LayerDrawable(jarray(Drawable)([dark, white]))
             # each ring placed on its own (an InsetDrawable layer would push the next layer in by its padding)
             o = inset - dp(1)
