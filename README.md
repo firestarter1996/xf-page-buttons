@@ -31,6 +31,25 @@ No button ever covers a message. Every bubble, yours and everyone else's, with o
 
 A switch side button sits above the top button. One tap flips the column between right and left: the setting is saved and the open chat is laid out once on the new side.
 
+## What's new in 1.7.3 (11-14-2026)
+
+Fix for presses that opened the message menu. XF only takes presses for the button column inside a box 300 dp tall at the bottom of the chat. Buttons raised above that box were drawn but could not be pressed, so the press reached the message under them.
+
+* The column now takes presses over the full height of the chat, so a button works wherever it is drawn. Only the buttons take a touch: taps, long presses, scrolling and swipe to reply beside them still reach the messages.
+* The buttons take their raised place right after a chat opens, and again after the screen is rotated.
+* When the plugin is switched off or reloaded it removes its own buttons and puts the column back, on the screen thread.
+
+## What's new in 1.7.2 (11-14-2026)
+
+Crash fix. With the column raised and the keyboard open, buttons could end up above the message list, and on some phones XF's glass effect then aborted the whole app ("Unable to create layer for glass_down_0").
+
+* The buttons now always stay below the chat header. The plugin measures the room above the column and lowers it until page up fits. A button that still has no room is hidden until there is room again.
+* Room is kept for XF's own reactions heart and mentions buttons, so they never sit on top of page up.
+* The buttons are placed again whenever XF slides the column (keyboard, message box).
+* A guard on XF's own glass rectangles gives any rectangle with no height or width one pixel before XF draws it, whatever caused it.
+* Every callback is wrapped, so an error inside the plugin can never reach XF.
+* The saved height drops by 2 once (23% becomes 21%, the Middle preset).
+
 ## What's new in 1.7.1 (11-14-2026)
 
 The column sits another 5% of the screen higher (23% in all, the Middle preset). A saved height rises by 5 once. The High preset is now 35%.
