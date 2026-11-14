@@ -17,8 +17,9 @@ Long bot replies fill my chats. Flinging overshoots, and the stock button only j
 * Hold the switch side button to hide all the buttons until the topic or chat is opened again (a short tick, no popup).
 * Easy to see in the sun: white arrows, a white ring with a thin dark edge around every button, and a fill in your theme's accent blue while a button is pressed.
 * Every tap on top, page up, page down, end and switch side, and every tap on a topic tab, gives one very short haptic tick, the same key press tick Gboard uses by default. It follows the system touch feedback setting and Nagram's Disable vibration switch.
-* Page up is inverted: a pure white circle with a black arrow, the same contrast turned around, so the button used most is the easiest one to find.
-* Height on screen is a slider that moves the whole button column up or down, from the bottom edge up to 40% of the screen, with Lowest, Low, Middle and High presets. The default is 5%.
+* Page up is inverted: a pure white circle with a black ring and a black arrow, the same contrast turned around, so the button used most is the easiest one to find.
+* Height on screen is a slider that moves the whole button column up or down, from the bottom edge up to 50% of the screen, with Lowest, Low, Middle and High presets. The default is 18%.
+* Send a message while you are scrolled up and the chat stays where you were reading. Jump to bottom after sending is a setting, off by default; at the bottom the chat follows your message as usual.
 * Space between buttons and Button size are sliders right on the settings page, each with preset buttons under it (Tight, Roomy, Wide, Widest; Small, Normal, Large, Largest), so a thumb does not land on the wrong button.
 * Works in private chats, groups, channels and forum topics.
 
@@ -29,6 +30,18 @@ Off by default. On moves the whole button column to the left edge and mirrors th
 No button ever covers a message. Every bubble, yours and everyone else's, with or without a picture, albums and stickers included, starts to the right of the button column. Service messages and dates center in the space beside the buttons. With the switch off nothing changes.
 
 A switch side button sits above the top button. One tap flips the column between right and left: the setting is saved and the open chat is laid out once on the new side.
+
+## What's new in 1.7.0 (11-14-2026)
+
+* New setting, Jump to bottom after sending, off by default. Off: when you send a message while scrolled up, the chat stays where you were reading and your message lands below. On: stock behavior, the chat jumps to your new message. If you are already at the bottom, the chat follows your message either way.
+* The column sits another 8% of the screen higher (18% in all, the Middle preset). A saved height rises by 8 once. The Height on screen slider now reaches 50%, and its presets are Lowest (0%), Low (10%), Middle (18%) and High (30%).
+* How it works: XF jumps in two places when a message of your own arrives in the open chat, `moveScrollToLastMessage` when the newest messages are loaded and `scrollToLastMessage` when they are not. Both calls are skipped while the setting is off and the list is scrolled up. The hooks run only at that moment, never per frame or per scroll.
+
+## What's new in 1.6.1 (11-14-2026)
+
+The column sits another 5% of the screen higher, and buttons are another 3% bigger, once, from whatever size you had.
+
+Page up is now the exact inverse of the other buttons. They have a glass circle, a 2 dp white ring with a 1 dp dark edge outside it, and a white arrow. Page up has a white circle, a 2 dp black ring in the same place with a 1 dp white edge outside it, and a black arrow. Same size and shape, nothing else changed.
 
 ## What's new in 1.6.0 (11-14-2026)
 
