@@ -1,8 +1,8 @@
 __id__ = "page_buttons"
 __name__ = "Page Up Down"
-__description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left, everyone else on the right and every message clear of the buttons and every bubble tail pointing the mirrored way. A switch button above top flips the side with one tap; hold it to hide all the buttons until the topic is opened again. Every button has white arrows and a white ring with a dark edge so it reads in the sun, and fills with your accent blue while pressed. Every tap on these buttons and on a topic tab gives a very short haptic tick, like a keyboard key press. The share button next to messages is hidden. Made by [firestarter1996](https://github.com/firestarter1996)."
+__description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left, everyone else on the right and every message clear of the buttons and every bubble tail pointing the mirrored way. A switch button above top flips the side with one tap; hold it to hide all the buttons until the topic is opened again. Every button has white arrows and a white ring with a dark edge so it reads in the sun, and fills with your accent blue while pressed. Page up is inverted, a white circle with a black arrow, so the button used most stands out. A Height on screen slider moves the whole column up or down. Every tap on these buttons and on a topic tab gives a very short haptic tick, like a keyboard key press. The share button next to messages is hidden. Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.4.4"
+__version__ = "1.6.0"
 
 # Two round buttons in the same style as the stock "scroll to bottom" button sit
 # right above it in the chat's side button column:
@@ -69,7 +69,9 @@ from java import jclass, dynamic_proxy, jarray, jint
 from base_plugin import BasePlugin, MethodHook
 from hook_utils import find_class, get_private_field, set_private_field
 from android_utils import run_on_ui_thread, dp, OnClickListener, OnLongClickListener, R
-from ui.settings import Header, Switch, Divider, Selector
+from ui.settings import Header, Switch, Divider, Selector, Custom
+from client_utils import get_last_fragment
+import zlib
 
 LOG_TAG = "PageButtons"
 MODE_SEARCH = 7
@@ -78,6 +80,27 @@ STEP_DP = 54
 # 1.4.4: the setting "Space between buttons" picks the distance from one button to the next (44 dp circles).
 STEP_CHOICES = (54, 62, 70, 80)
 STEP_DEFAULT = 1
+# 1.5.0 (owner 11-11-2026: "I want the space between page up down buttons to be controlled by a slider, and you shouldn't
+# also have to access a second page in the settings to change it. But it should also have buttons that keep the current
+# options available. And there also should be a slider that changes button scale, and buttons with presets too."):
+# two sliders right on the plugin's settings page, each with preset buttons under it. "gap" is the empty space between two
+# circles in dp (the old steps Tight, Roomy, Wide, Extra wide are gaps of 10, 18, 26, 36); "scale" sizes every button,
+# the stock end button included. The distance from one button to the next is 44 dp x scale + gap, so bigger buttons never
+# overlap. Both are read with the enabled switch (at most twice a second) and applied on the next layout pass.
+CIRCLE_DP = 44
+GAP_MIN, GAP_MAX = 0.0, 60.0
+GAP_PRESETS = (("🤏🏻 Tight", 10), ("👌🏻 Roomy", 18), ("↔️ Wide", 26), ("🛣 Widest", 36))
+GAP_DEFAULT = 18
+SCALE_MIN, SCALE_MAX = 0.7, 1.6
+SCALE_PRESETS = (("🔹 Small", 0.85), ("⚪ Normal", 1.0), ("🔵 Large", 1.2), ("⭕ Largest", 1.4))
+SCALE_DEFAULT = 1.0
+# 1.6.0 (owner 11-14-2026: "I also want a new slider that changes the y positioning of each of the buttons. And, move
+# them up about 5% right now."): "lift" raises the whole column (end, page down, page up, top, switch side, and the
+# mention and reaction buttons above them) by a share of the screen height, so the buttons keep their order and the
+# spacing slider keeps deciding the distance between them. Default 5%. Read with the other settings, at most twice a second.
+LIFT_MIN, LIFT_MAX = 0.0, 40.0
+LIFT_PRESETS = (("⬇️ Lowest", 0), ("👍🏻 Low", 5), ("↕️ Middle", 15), ("⬆️ High", 30))
+LIFT_DEFAULT = 5
 OVERLAP_DP = 96
 REPEAT_FIRST_MS = 400
 REPEAT_MS = 350
@@ -209,9 +232,147 @@ class _Buttons:
         self.show = True
         self.hidden = False
         self.holders = None
+        self.lifted = {}   # holder index -> (y this plugin set, XF's own y under it)
 
 
 class PageButtonsPlugin(BasePlugin):
+
+    def _num(self, key, default, lo, hi):
+        try:
+            v = float(self.get_setting(key, None))
+        except Exception:
+            v = None
+        if v is None and key == "gap":   # 1.4.4 step index carried over once
+            try:
+                i = int(self.get_setting("spacing", STEP_DEFAULT) or 0)
+                v = float(STEP_CHOICES[i] - CIRCLE_DP) if 0 <= i < len(STEP_CHOICES) else None
+            except Exception:
+                v = None
+        if v is None:
+            v = float(default)
+        return min(hi, max(lo, v))
+
+    def _size_rows(self):
+        """The two slider rows with their preset buttons, built only when the settings page opens."""
+        ctx = None
+        try:
+            f = get_last_fragment()
+            ctx = f.getParentActivity() if f is not None else None
+        except Exception:
+            pass
+        if ctx is None:
+            return []
+        UItem = jclass("org.telegram.ui.Components.UItem")
+        out = []
+        self.set_refs = []
+        for key, title, default, lo, hi, presets, fmt, store in (
+                ("gap", "Space between buttons", GAP_DEFAULT, GAP_MIN, GAP_MAX, GAP_PRESETS,
+                 lambda x: "%d dp" % int(round(x)), lambda x: str(int(round(x)))),
+                ("scale", "Button size", SCALE_DEFAULT, SCALE_MIN, SCALE_MAX, SCALE_PRESETS,
+                 lambda x: "%d%%" % int(round(x * 100)), lambda x: "%.2f" % x),
+                ("lift", "Height on screen", LIFT_DEFAULT, LIFT_MIN, LIFT_MAX, LIFT_PRESETS,
+                 lambda x: "%d%%" % int(round(x)), lambda x: str(int(round(x))))):
+            try:
+                view = self._slider_row(ctx, key, title, default, lo, hi, presets, fmt, store)
+                out.append(Custom(item=UItem.asCustom(jint(zlib.crc32(("pb_" + key).encode()) & 0x7FFFFFFF), view)))
+            except Exception as e:
+                _log("settings row %s: %s" % (key, e))
+        return out
+
+    def _slider_row(self, ctx, key, title, default, lo, hi, presets, fmt, store):
+        LinearLayout = jclass("android.widget.LinearLayout")
+        TextView = jclass("android.widget.TextView")
+        AU = jclass("org.telegram.messenger.AndroidUtilities")
+        SeekBarView = jclass("org.telegram.ui.Components.SeekBarView")
+        LayoutHelper = jclass("org.telegram.ui.Components.LayoutHelper")
+        plugin = self
+        root = LinearLayout(ctx)
+        root.setOrientation(LinearLayout.VERTICAL)
+        root.setPadding(AU.dp(21), AU.dp(12), AU.dp(21), AU.dp(14))
+        row = LinearLayout(ctx)
+        row.setOrientation(LinearLayout.HORIZONTAL)
+        row.setGravity(Gravity.CENTER_VERTICAL)
+        t = TextView(ctx)
+        t.setText(title)
+        t.setTextSize(16)
+        t.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
+        row.addView(t, LinearLayout.LayoutParams(0, -2, 1.0))
+        v = TextView(ctx)
+        v.setTextSize(14)
+        v.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueText))
+        v.setTypeface(AU.bold())
+        row.addView(v, LayoutHelper.createLinear(-2, -2))
+        root.addView(row, LayoutHelper.createLinear(-1, -2))
+        bar = SeekBarView(ctx)
+        bar.setReportChanges(True)
+        root.addView(bar, LayoutHelper.createLinear(-1, 38, 0, 4, 0, 0, 0))
+        chips = LinearLayout(ctx)
+        chips.setOrientation(LinearLayout.HORIZONTAL)
+        root.addView(chips, LayoutHelper.createLinear(-1, -2, 0, 8, 0, 0, 0))
+        accent = Theme.getColor(Theme.key_windowBackgroundWhiteBlueText)
+        plain = Theme.getColor(Theme.key_windowBackgroundWhiteGrayText2)
+        chip_views = []
+
+        def paint(cur):
+            v.setText(fmt(cur))
+            for (label, val), cv in zip(presets, chip_views):
+                on = abs(cur - val) < 0.005
+                bg = GradientDrawable()
+                bg.setCornerRadius(float(AU.dp(16)))
+                bg.setStroke(AU.dp(1), accent if on else plain)
+                if on:
+                    bg.setColor((accent & 0x00FFFFFF) | 0x33000000)
+                cv.setBackground(bg)
+                cv.setTextColor(accent if on else Theme.getColor(Theme.key_windowBackgroundWhiteBlackText))
+
+        def set_value(val, move_bar):
+            val = min(hi, max(lo, float(val)))
+            plugin.set_setting(key, store(val))
+            plugin.enabled_t = 0.0   # the next layout pass reads it at once
+            paint(val)
+            if move_bar:
+                bar.setProgress(float((val - lo) / (hi - lo)))
+
+        for label, val in presets:
+            cv = TextView(ctx)
+            cv.setText(label)
+            cv.setTextSize(13)
+            cv.setGravity(Gravity.CENTER)
+            cv.setSingleLine(True)
+            cv.setPadding(AU.dp(4), AU.dp(8), AU.dp(4), AU.dp(8))
+            cv.setOnClickListener(OnClickListener(lambda _v, x=val: (_tick(_v), set_value(x, True))))
+            chips.addView(cv, LayoutHelper.createLinear(0, -2, 1.0, 3, 0, 3, 0))
+            chip_views.append(cv)
+        dcls = jclass("org.telegram.ui.Components.SeekBarView$SeekBarViewDelegate")
+
+        class _D(dynamic_proxy(dcls)):
+            def onSeekBarDrag(this, stop, progress):
+                raw = lo + (hi - lo) * float(progress)
+                # snap onto a preset when the thumb is within a hair of it, so the matching button lights up
+                for _l, pv in presets:
+                    if abs(raw - pv) <= (hi - lo) * 0.012:
+                        raw = pv
+                set_value(raw if key == "scale" else round(raw), False)
+
+            def onSeekBarPressed(this, pressed):
+                return None
+
+            def getContentDescription(this):
+                return title
+
+            def getStepsCount(this):
+                return 0
+
+            def needVisuallyDivideSteps(this):
+                return False
+
+        d = _D()
+        self.set_refs.append(d)
+        bar.setDelegate(d)
+        cur = self._num(key, default, lo, hi)
+        paint(cur)
+        bar.setProgress(float((cur - lo) / (hi - lo)))
+        return root
 
     def create_settings(self):
         return [
@@ -219,8 +380,7 @@ class PageButtonsPlugin(BasePlugin):
             Switch(key="enabled", text="Show page buttons in chats", default=True,
                    subtext="Up and down buttons that move the messages one screen per tap, and an end arrow with a line under it."),
             Switch(key="swap", text="Swap buttons position", default=False),
-            Selector(key="spacing", text="Space between buttons", default=STEP_DEFAULT,
-                     items=["Tight", "Roomy", "Wide", "Extra wide"]),
+        ] + self._size_rows() + [
             Switch(key="hide_share", text="Hide the share button", default=True,
                    subtext="Removes the round share arrow next to messages."),
             Divider(text="Reopen a chat after changing these."),
@@ -268,6 +428,10 @@ class PageButtonsPlugin(BasePlugin):
         self.end_icons = set()     # stock end buttons that already got the new icon
         self.enabled_t = 0.0
         self.step_dp = STEP_CHOICES[STEP_DEFAULT]
+        self.gap_dp = float(GAP_DEFAULT)
+        self.scale = SCALE_DEFAULT
+        self.lift_px = 0.0
+        self.inverted = set()      # inner round button views with the inverted look (page up)
         self.enabled = True
         self.avatar_hook = False
         self.side_left = False
@@ -406,7 +570,8 @@ class PageButtonsPlugin(BasePlugin):
                 # stock sets the arrow color again on a theme change: keep it pure white
                 if int(param.thisObject.hashCode()) in plugin.styled:
                     try:
-                        param.thisObject.setIconColor(-1)
+                        h = int(param.thisObject.hashCode())
+                        param.thisObject.setIconColor(-16777216 if h in plugin.inverted else -1)
                     except Exception:
                         pass
 
@@ -445,7 +610,23 @@ class PageButtonsPlugin(BasePlugin):
                 self._post_once(lambda f=frag: self._setup(f), 0)
         except Exception as e:
             _log("open chat at load: %s" % e)
-        _log("loaded " + __version__)
+        try:   # 1.5.1, once (owner 11-11-2026: "increase the size of the buttons by 5%")
+            if not self.get_setting("bump_105", False):
+                cur = self._num("scale", SCALE_DEFAULT, SCALE_MIN, SCALE_MAX)
+                self.set_setting("scale", "%.2f" % min(SCALE_MAX, cur * 1.05))
+                self.set_setting("bump_105", True)
+                self.enabled_t = 0.0
+        except Exception as e:
+            _log("size bump: %s" % e)
+        try:   # 1.6.0, once (owner 11-14-2026: "And increase the buttons size by another 3%")
+            if not self.get_setting("bump_103", False):
+                cur = self._num("scale", SCALE_DEFAULT, SCALE_MIN, SCALE_MAX)
+                self.set_setting("scale", "%.2f" % min(SCALE_MAX, cur * 1.03))
+                self.set_setting("bump_103", True)
+                self.enabled_t = 0.0
+        except Exception as e:
+            _log("size bump 3: %s" % e)
+        _log("loaded %s, size %.2f" % (__version__, self._num("scale", SCALE_DEFAULT, SCALE_MIN, SCALE_MAX)))
 
     def on_plugin_unload(self):
         self.alive = False
@@ -463,6 +644,15 @@ class PageButtonsPlugin(BasePlugin):
             _log("unload: %s" % e)
         if not self.loaded:
             return
+        try:   # 1.6.0: stock buttons this plugin moved go back to XF's own place, so a reload never lifts them twice
+            for st in list(self.chats.values()):
+                for i, (mine, stock) in list(st.lifted.items()):
+                    b = st.holders[i].button
+                    if abs(float(b.getTranslationY()) - mine) < 0.5:
+                        b.setTranslationY(float(stock))
+                st.lifted = {}
+        except Exception as e:
+            _log("unload lift: %s" % e)
         self.hide_share = False
         self._apply_share()
 
@@ -563,7 +753,7 @@ class PageButtonsPlugin(BasePlugin):
         layout.addView(b, FrameLayoutParams(dp(56), dp(64), gravity))
         st = _Buttons(chat, layout, made["top"], made["up"], made["down"], b)
         for v in (made["top"], made["up"], made["down"], b):
-            self._sun_look(v, rp)
+            self._sun_look(v, rp, v is made["up"])
         mode = int(get_private_field(chat, "chatMode") or 0)
         st.show = mode != MODE_SEARCH
         self.chats[int(layout.hashCode())] = st
@@ -960,8 +1150,10 @@ class PageButtonsPlugin(BasePlugin):
         except Exception as e:
             _log("end look: %s" % e)
 
-    def _sun_look(self, btn, rp):
-        """White arrows, a white ring with a dark ring outside it, and an accent blue fill while pressed."""
+    def _sun_look(self, btn, rp, invert=False):
+        """White arrows, a white ring with a dark ring outside it, and an accent blue fill while pressed.
+        invert (1.6.0, page up; owner 11-14-2026: "invert the colors, so the arrow is black, but the button fill
+        is white"): the circle rests filled pure white with a pure black arrow. Static drawables, set once."""
         try:
             inner = get_private_field(btn, "buttonView")
             if inner is None or int(inner.hashCode()) in self.styled:
@@ -975,7 +1167,14 @@ class PageButtonsPlugin(BasePlugin):
             fill.setColor(accent)
             pressed = StateListDrawable()
             pressed.addState(jarray(jint)([16842919]), InsetDrawable(fill, inset))   # android.R.attr.state_pressed
-            pressed.addState(jarray(jint)([]), ColorDrawable(0))
+            if invert:
+                rest = GradientDrawable()
+                rest.setShape(GradientDrawable.OVAL)
+                rest.setColor(-1)
+                pressed.addState(jarray(jint)([]), InsetDrawable(rest, inset))
+                self.inverted.add(int(inner.hashCode()))
+            else:
+                pressed.addState(jarray(jint)([]), ColorDrawable(0))
             # the fill sits under the arrow: a view at the bottom of the button's children
             under = View(inner.getContext())
             under.setBackground(pressed)
@@ -996,7 +1195,7 @@ class PageButtonsPlugin(BasePlugin):
             rings.setLayerInset(0, o, o, o, o)
             rings.setLayerInset(1, inset, inset, inset, inset)
             inner.setForeground(rings)
-            inner.setIconColor(-1)
+            inner.setIconColor(-16777216 if invert else -1)
         except Exception as e:
             _log("look: %s" % e)
 
@@ -1026,11 +1225,14 @@ class PageButtonsPlugin(BasePlugin):
         if now - self.enabled_t > 0.5:
             self.enabled_t = now
             self.enabled = bool(self.get_setting("enabled", True))
+            self.gap_dp = self._num("gap", GAP_DEFAULT, GAP_MIN, GAP_MAX)
+            self.scale = self._num("scale", SCALE_DEFAULT, SCALE_MIN, SCALE_MAX)
+            self.step_dp = CIRCLE_DP * self.scale + self.gap_dp
             try:
-                i = int(self.get_setting("spacing", STEP_DEFAULT) or 0)
-                self.step_dp = STEP_CHOICES[i] if 0 <= i < len(STEP_CHOICES) else STEP_CHOICES[STEP_DEFAULT]
+                h = float(jclass("org.telegram.messenger.AndroidUtilities").displaySize.y)
             except Exception:
-                self.step_dp = STEP_CHOICES[STEP_DEFAULT]
+                h = 0.0
+            self.lift_px = float(round(h * self._num("lift", LIFT_DEFAULT, LIFT_MIN, LIFT_MAX) / 100.0))
         return self.enabled
 
     def _place(self, st):
@@ -1058,20 +1260,58 @@ class PageButtonsPlugin(BasePlugin):
                 c = float(h1.counterVisibilityAnimator.getFloatValue())
                 base += (dp(44) + dp(10 + 10 * c)) * end_vis
         shown = st.show and self._is_enabled()
+        sc = self.scale if shown else 1.0
         step = dp(self.step_dp) if shown else 0
-        # the same extra room goes between the end arrow and page down
-        y = base + (dp(self.step_dp - STEP_DP) if shown and base > 0 else 0)
+        # the same extra room goes between the end arrow and page down (stock spacing there is a 44 dp circle + 10 dp)
+        first = dp(self.step_dp - STEP_DP) if shown and base > 0 else 0
+        lift = self.lift_px if shown else 0.0
+        y = base + first + lift
+        if holders is not None and holders[BUTTON_PAGE_DOWN] is not None:
+            eb = holders[BUTTON_PAGE_DOWN].button
+            if abs(eb.getScaleX() - sc) > 0.001 and end_vis >= 0.999:   # 1.5.0: the end button takes the same size
+                eb.setScaleX(float(sc))
+                eb.setScaleY(float(sc))
         for which in ("down", "up", "top", "side"):
             b = st.btn[which]
             b.setVisibility(View.VISIBLE if shown else View.GONE)
             b.setAlpha(1.0)
-            b.setScaleX(1.0)
-            b.setScaleY(1.0)
+            b.setScaleX(float(sc))
+            b.setScaleY(float(sc))
             b.setTranslationY(float(-y))
             y += step
-        extra = 4 * step + (dp(self.step_dp - STEP_DP) if shown and base > 0 else 0)
-        if holders is not None and extra > 0:
-            for i in range(2, len(holders)):
+        extra = 4 * step + first
+        if holders is not None and (extra > 0 or lift > 0 or st.lifted):
+            for i in range(0, len(holders)):
                 h = holders[i]
-                if h is not None:
-                    h.button.setTranslationY(float(h.button.getTranslationY() - extra))
+                if h is not None and i < 2:
+                    # 1.6.0: the stock end button (and the button under it) rise with the column, nothing else changes
+                    b = h.button
+                    cur = float(b.getTranslationY())
+                    last = st.lifted.get(i)
+                    stock = last[1] if last is not None and abs(cur - last[0]) < 0.5 else cur
+                    new_y = stock - lift
+                    if abs(cur - new_y) > 0.5:
+                        b.setTranslationY(new_y)
+                    st.lifted[i] = (new_y, stock)
+                elif h is not None:
+                    # 1.5.1 (owner 11-11-2026: "heart button is way high"): XF does not always reset these buttons'
+                    # position between two passes, so subtracting from whatever is there pushed the reactions heart up
+                    # twice. Start from XF's own position: if it still holds what this plugin set last time, use the
+                    # XF value remembered then.
+                    b = h.button
+                    # 1.5.2 (owner 11-11-2026: "The heart button also does not match the styles of the other buttons"):
+                    # the reactions heart and the mentions button get the same white ring look and the same size
+                    try:
+                        self._sun_look(b, get_private_field(b, "resourcesProvider"))
+                    except Exception as e:
+                        _log("heart look: %s" % e)
+                    if abs(b.getScaleX() - sc) > 0.001:
+                        b.setScaleX(float(sc))
+                        b.setScaleY(float(sc))
+                    cur = float(b.getTranslationY())
+                    last = st.lifted.get(i)
+                    stock = last[1] if last is not None and abs(cur - last[0]) < 0.5 else cur
+                    new_y = stock - extra - lift
+                    if abs(cur - new_y) > 0.5:
+                        b.setTranslationY(new_y)
+                    st.lifted[i] = (new_y, stock)
