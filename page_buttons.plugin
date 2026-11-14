@@ -2,7 +2,7 @@ __id__ = "page_buttons"
 __name__ = "Page Up Down"
 __description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left, everyone else on the right and every message clear of the buttons and every bubble tail pointing the mirrored way. A switch button above top flips the side with one tap; hold it to hide all the buttons until the topic is opened again. Every button has white arrows and a white ring with a dark edge so it reads in the sun, and fills with your accent blue while pressed. Page up is the exact inverse, a white circle with a black ring and a black arrow, so the button used most stands out. A Height on screen slider moves the whole column up or down. Every tap on these buttons and on a topic tab gives a very short haptic tick, like a keyboard key press. The share button next to messages is hidden. Sending a message while you are scrolled up no longer jumps the chat to the bottom (a setting, Jump to bottom after sending, off by default). Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.7.2"
+__version__ = "1.7.3"
 
 # Two round buttons in the same style as the stock "scroll to bottom" button sit
 # right above it in the chat's side button column:
@@ -221,6 +221,22 @@ class _Repeat:
         except Exception as e:
             self.held = False
             _log("repeat: %s" % e)
+
+
+class _Laid(dynamic_proxy(jclass("android.view.View$OnLayoutChangeListener"))):
+    """1.7.3: tells the plugin when the side column changed height (rotation, split screen), so the buttons are
+    placed again with the new sizes. One integer compare per layout pass of that one view."""
+
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+
+    def onLayoutChange(self, v, l, t, r, b, ol, ot, orr, ob):
+        try:
+            if (b - t) != (ob - ot):
+                self.fn()
+        except Exception as e:      # an error in a callback must never reach XF
+            _log("laid: %s" % e)
 
 
 class _DatePicked(dynamic_proxy(IntCallback)):
@@ -818,15 +834,52 @@ class PageButtonsPlugin(BasePlugin):
             _log("unload: %s" % e)
         if not self.loaded:
             return
-        try:   # 1.6.0: stock buttons this plugin moved go back to XF's own place, so a reload never lifts them twice
-            for st in list(self.chats.values()):
-                for i, (mine, stock) in list(st.lifted.items()):
-                    b = st.holders[i].button
-                    if abs(float(b.getTranslationY()) - mine) < 0.5:
-                        b.setTranslationY(float(stock))
-                st.lifted = {}
+        # 1.7.3: XF calls unload on its plugin thread, and Android only lets the screen thread touch views (a layout
+        # change from the wrong thread throws half way and leaves the column unable to lay out its buttons). So all
+        # the putting back happens in one step on the screen thread, before the next version sets itself up.
+        chats = list(self.chats.values())
+
+        def clean():
+            for st in chats:
+                try:   # 1.6.0: stock buttons this plugin moved go back to XF's own place, so a reload never lifts them twice
+                    for i, (mine, stock) in list(st.lifted.items()):
+                        b = st.holders[i].button
+                        if abs(float(b.getTranslationY()) - mine) < 0.5:
+                            b.setTranslationY(float(stock))
+                    st.lifted = {}
+                except Exception as e:
+                    _log("unload lift: %s" % e)
+                try:
+                    if getattr(st, "laid", None) is not None:
+                        st.layout.removeOnLayoutChangeListener(st.laid)
+                        st.laid = None
+                except Exception as e:
+                    _log("unload laid: %s" % e)
+                try:    # this plugin's own buttons leave the screen with it, so no old listener stays behind
+                    for b in list(st.btn.values()):
+                        b.setOnClickListener(None)
+                        b.setOnLongClickListener(None)
+                        b.setOnTouchListener(None)
+                        st.layout.removeView(b)
+                except Exception as e:
+                    _log("unload buttons: %s" % e)
+                try:    # the column box goes back to XF's own 300 dp
+                    lp = st.layout.getLayoutParams()
+                    if lp is not None and int(lp.height) == -1:
+                        lp.height = dp(300)
+                        st.layout.setLayoutParams(lp)
+                except Exception as e:
+                    _log("unload box: %s" % e)
+
+        def clean_safe():
+            try:
+                clean()
+            except Exception as e:
+                _log("unload clean: %s" % e)
+        try:
+            run_on_ui_thread(clean_safe)
         except Exception as e:
-            _log("unload lift: %s" % e)
+            _log("unload post: %s" % e)
         self.hide_share = False
         self._apply_share()
 
@@ -947,6 +1000,19 @@ class PageButtonsPlugin(BasePlugin):
         mode = int(get_private_field(chat, "chatMode") or 0)
         st.show = mode != MODE_SEARCH
         self.chats[int(layout.hashCode())] = st
+        try:
+            def resized(st=st):
+                self.enabled_t = 0.0            # the height in pixels follows the new screen height
+
+                def go(st=st):
+                    if int(st.layout.hashCode()) in self.chats:
+                        st.settle = None
+                        self._place(st)
+                self._post_once(go, 50)
+            st.laid = _Laid(resized)
+            layout.addOnLayoutChangeListener(st.laid)
+        except Exception as e:
+            _log("laid hook: %s" % e)
         if st.show:
             try:
                 layout.showButton(BUTTON_PAGE_DOWN, True, False)
@@ -1026,8 +1092,14 @@ class PageButtonsPlugin(BasePlugin):
             if lp is None:
                 return
             want = (Gravity.LEFT if left else Gravity.RIGHT) | Gravity.BOTTOM
-            if int(lp.gravity) != want:
+            # 1.7.3 (owner 11-14-2026: "I'm now getting this pop-up every time I press an up down button"): XF makes
+            # the side column a box 300 dp tall. Android only hands a touch to a button when the touch lands inside
+            # its parent box, so every button this plugin raised above that box was drawn but could not be pressed, and
+            # the press fell through to the message under it. The box now runs the full height of the chat (it has
+            # no background and takes no touches itself), so a button is pressable wherever it is drawn.
+            if int(lp.gravity) != want or int(lp.height) != -1:
                 lp.gravity = want
+                lp.height = -1
                 layout.setLayoutParams(lp)
             if left and not self.avatar_hook:
                 self._hook_avatars()
@@ -1434,15 +1506,17 @@ class PageButtonsPlugin(BasePlugin):
             layout = st.layout
             lv = get_private_field(st.chat, "chatListView")
             b = st.btn["up"]
-            if lv is None or layout.getHeight() <= 0 or lv.getHeight() <= 0 or b.getHeight() <= 0:
+            if lv is None or layout.getHeight() <= 0 or lv.getHeight() <= 0:
                 return None
             ll = jarray(jint)([0, 0])
             lb = jarray(jint)([0, 0])
             lv.getLocationInWindow(ll)
             layout.getLocationInWindow(lb)
             line = float(ll[1]) + float(lv.getPaddingTop())          # bottom edge of the chat header
-            rest_top = float(lb[1]) + float(b.getTop())                # the button's top with no translation
-            grow = float(b.getHeight()) * max(0.0, float(sc) - 1.0)   # a scaled button reaches higher
+            # every button rests at the bottom of the column in a box 64 dp tall (1.7.3: taken from the column
+            # itself, a button added a moment ago has no measured place yet)
+            rest_top = float(lb[1]) + float(layout.getHeight()) - dp(64)
+            grow = float(dp(64)) * max(0.0, float(sc) - 1.0)          # a scaled button reaches higher
             return max(0.0, rest_top - line - grow - dp(10))
         except Exception as e:
             _log("room: %s" % e)
@@ -1498,7 +1572,20 @@ class PageButtonsPlugin(BasePlugin):
                         above += (dp(44) + dp(10 + 10 * c)) * v * max(1.0, sc)
         if room is None:
             lift = 0.0                      # sizes not known yet (before the first layout): stock place, no lift
+            # 1.7.3: 1.7.2 left the column unlifted when a chat opened, until something else moved it. Look again
+            # once the views have been laid out (at most 6 short one shot timers per chat screen, no polling).
+            tries = getattr(st, "tries", 0)
+            if tries < 6 and not getattr(st, "waiting", False):
+                st.tries = tries + 1
+                st.waiting = True
+
+                def again(st=st):
+                    st.waiting = False
+                    if int(st.layout.hashCode()) in self.chats:
+                        self._place(st)
+                self._post_once(again, 80)
         else:
+            st.tries = 0
             room = max(0.0, room - above)   # what is left for this plugin's own buttons
             lift = max(0.0, min(lift, room - (base + first + step)))
         y = base + first + lift
@@ -1519,6 +1606,22 @@ class PageButtonsPlugin(BasePlugin):
             b.setScaleY(float(sc))
             b.setTranslationY(float(-y) if fits else 0.0)
             y += step
+        # 1.7.3: when the column had to be lowered or a button hidden, the sizes may have been read in the middle of a
+        # change (rotation, keyboard). Look once more a moment later; stop as soon as the numbers repeat.
+        if shown and room is not None:
+            if lift < self.lift_px - 0.5 or n_fit < 4:
+                key = (int(room), int(lift), n_fit)
+                if getattr(st, "settle", None) != key and not getattr(st, "waiting", False):
+                    st.settle = key
+                    st.waiting = True
+
+                    def settle(st=st):
+                        st.waiting = False
+                        if int(st.layout.hashCode()) in self.chats:
+                            self._place(st)
+                    self._post_once(settle, 300)
+            else:
+                st.settle = None
         extra = n_fit * step + first           # XF's heart and mentions sit right above the buttons that are shown
         if room is not None:
             room += above
