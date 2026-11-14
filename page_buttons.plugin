@@ -2,7 +2,7 @@ __id__ = "page_buttons"
 __name__ = "Page Up Down"
 __description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left, everyone else on the right and every message clear of the buttons and every bubble tail pointing the mirrored way. A switch button above top flips the side with one tap; hold it to hide all the buttons until the topic is opened again. Every button has white arrows and a white ring with a dark edge so it reads in the sun, and fills with your accent blue while pressed. Page up is the exact inverse, a white circle with a black ring and a black arrow, so the button used most stands out. A Height on screen slider moves the whole column up or down. Every tap on these buttons and on a topic tab gives a very short haptic tick, like a keyboard key press. The share button next to messages is hidden. Sending a message while you are scrolled up no longer jumps the chat to the bottom (a setting, Jump to bottom after sending, off by default). Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.7.1"
+__version__ = "1.7.2"
 
 # Two round buttons in the same style as the stock "scroll to bottom" button sit
 # right above it in the chat's side button column:
@@ -102,8 +102,9 @@ LIFT_MIN, LIFT_MAX = 0.0, 50.0
 # 1.6.1 (owner 11-14-2026: "Move the buttons up another 5%"): default 10, and a saved value rises by 5 once.
 # 1.6.2 (owner 11-14-2026: "Buttons up eight"): default 18, a saved value rises by 8 once, the slider reaches 50.
 # 1.7.1 (owner 11-14-2026: "Buttons up 5"): default 23, a saved value rises by 5 once.
-LIFT_PRESETS = (("⬇️ Lowest", 0), ("👍🏻 Low", 10), ("↕️ Middle", 23), ("⬆️ High", 35))
-LIFT_DEFAULT = 23
+# 1.7.2 (owner 11-14-2026: "Buttons down 2"): default 21, a saved value drops by 2 once.
+LIFT_PRESETS = (("⬇️ Lowest", 0), ("👍🏻 Low", 10), ("↕️ Middle", 21), ("⬆️ High", 35))
+LIFT_DEFAULT = 21
 OVERLAP_DP = 96
 REPEAT_FIRST_MS = 400
 REPEAT_MS = 350
@@ -168,7 +169,10 @@ class _Updater(dynamic_proxy(UpdateListener)):
         self.fn = fn
 
     def onAnimationUpdate(self, animator):
-        self.fn(float(animator.getAnimatedValue()))
+        try:
+            self.fn(float(animator.getAnimatedValue()))
+        except Exception as e:      # 1.7.2: an error in a callback must never reach XF
+            _log("anim: %s" % e)
 
 
 class _Touch(dynamic_proxy(OnTouchIface)):
@@ -177,7 +181,10 @@ class _Touch(dynamic_proxy(OnTouchIface)):
         self.fn = fn
 
     def onTouch(self, view, event):
-        self.fn(int(event.getActionMasked()))
+        try:
+            self.fn(int(event.getActionMasked()))
+        except Exception as e:      # 1.7.2: an error in a callback must never reach XF
+            _log("touch: %s" % e)
         return False   # the button still gets the event, so a tap stays a tap
 
 
@@ -222,7 +229,10 @@ class _DatePicked(dynamic_proxy(IntCallback)):
         self.fn = fn
 
     def run(self, param):
-        self.fn(param)
+        try:
+            self.fn(param)
+        except Exception as e:      # 1.7.2: an error in a callback must never reach XF
+            _log("date: %s" % e)
 
 
 class _Buttons:
@@ -236,6 +246,7 @@ class _Buttons:
         self.hidden = False
         self.holders = None
         self.lifted = {}   # holder index -> (y this plugin set, XF's own y under it)
+        self.col_y = 0.0   # the side column's own translation when the buttons were last placed
 
 
 class PageButtonsPlugin(BasePlugin):
@@ -350,12 +361,15 @@ class PageButtonsPlugin(BasePlugin):
 
         class _D(dynamic_proxy(dcls)):
             def onSeekBarDrag(this, stop, progress):
-                raw = lo + (hi - lo) * float(progress)
-                # snap onto a preset when the thumb is within a hair of it, so the matching button lights up
-                for _l, pv in presets:
-                    if abs(raw - pv) <= (hi - lo) * 0.012:
-                        raw = pv
-                set_value(raw if key == "scale" else round(raw), False)
+                try:
+                    raw = lo + (hi - lo) * float(progress)
+                    # snap onto a preset when the thumb is within a hair of it, so the matching button lights up
+                    for _l, pv in presets:
+                        if abs(raw - pv) <= (hi - lo) * 0.012:
+                            raw = pv
+                    set_value(raw if key == "scale" else round(raw), False)
+                except Exception as e:      # 1.7.2: an error in a callback must never reach XF
+                    _log("slider: %s" % e)
 
             def onSeekBarPressed(this, pressed):
                 return None
@@ -474,12 +488,12 @@ class PageButtonsPlugin(BasePlugin):
 
         class PositionsHook(MethodHook):
             def after_hooked_method(self, param):
-                st = plugin.chats.get(int(param.thisObject.hashCode()))
-                if st is not None:
-                    try:
+                try:
+                    st = plugin.chats.get(int(param.thisObject.hashCode()))
+                    if st is not None:
                         plugin._place(st)
-                    except Exception as e:
-                        _log("place: %s" % e)
+                except Exception as e:
+                    _log("place: %s" % e)
 
         class ShowHook(MethodHook):
             def before_hooked_method(self, param):
@@ -654,6 +668,72 @@ class PageButtonsPlugin(BasePlugin):
             _log("topic hook: %s" % e)
         self.hook_method(side_cls.getDeclaredMethod("checkButtonsPositionsAndVisibility"), PositionsHook())
 
+        class MovedHook(MethodHook):
+            def after_hooked_method(self, param):
+                # 1.7.2: XF slides the whole side column up and down with the keyboard and the message box
+                # (updatePagedownButtonsPosition) without laying the buttons out again, so the room above them changes.
+                # Place them again only when the column really moved.
+                try:
+                    layout = get_private_field(param.thisObject, "sideControlsButtonsLayout")
+                    if layout is None:
+                        return
+                    st = plugin.chats.get(int(layout.hashCode()))
+                    if st is None:
+                        return
+                    ty = float(layout.getTranslationY())
+                    if abs(ty - st.col_y) > 0.5:
+                        st.col_y = ty
+                        plugin._place(st)
+                except Exception as e:
+                    _log("moved: %s" % e)
+
+        try:
+            self.hook_method(ca_cls.getDeclaredMethod("updatePagedownButtonsPosition", bool_t), MovedHook())
+        except Exception as e:
+            _log("moved hook: %s" % e)
+
+        class GlassGuardHook(MethodHook):
+            def after_hooked_method(self, param):
+                # 1.7.2 hard guard. XF clips every glass rectangle to the message list and never checks the result; a
+                # rectangle that ends up with no height or width makes the renderer abort the whole app ("Unable to
+                # create layer for glass_down_0, size 64x-64"). Whatever put it there (this plugin, another plugin or XF
+                # itself), give it one pixel so a layer can always be made. A handful of float reads, only when XF
+                # recomputes the glass positions (not while scrolling).
+                try:
+                    n = int(param.getResult())
+                    lst = param.args[0]
+                    for i in range(n):
+                        r = lst.get(i)
+                        if plugin.glass_fixed < 20 and (float(r.bottom) - float(r.top) < 1.0 or float(r.right) - float(r.left) < 1.0):
+                            _log("glass guard: rectangle %d of %d was %s" % (i, n, r.toShortString()))
+                        if float(r.bottom) - float(r.top) < 1.0:
+                            r.bottom = float(r.top) + 1.0
+                            plugin.glass_fixed += 1
+                        if float(r.right) - float(r.left) < 1.0:
+                            r.right = float(r.left) + 1.0
+                            plugin.glass_fixed += 1
+                    if not plugin.glass_seen:
+                        plugin.glass_seen = True
+                        _log("glass guard active")
+                    elif plugin.glass_fixed and plugin.glass_fixed != plugin.glass_logged and plugin.glass_fixed <= 20:
+                        plugin.glass_logged = plugin.glass_fixed
+                        _log("glass guard fixed a rectangle (%d so far)" % plugin.glass_fixed)
+                except Exception as e:
+                    _log("glass guard: %s" % e)
+
+        self.glass_seen = False
+        self.glass_fixed = 0
+        self.glass_logged = 0
+        try:
+            self.hook_method(ca_cls.getDeclaredMethod("getMergedVisibleBlurredPositions", find_class("java.util.List")), GlassGuardHook())
+            try:   # the one caller may have been compiled with the method folded in; make it call the hooked one
+                impl = ca_cls.getDeclaredMethod("invalidateMergedVisibleBlurredPositionsAndSourcesImpl", int_t)
+                jclass("de.robv.android.xposed.XposedBridge").deoptimizeMethod(impl)
+            except Exception as e:
+                _log("glass guard deopt: %s" % e)
+        except Exception as e:
+            _log("glass guard hook: %s" % e)
+
         self._apply_share()
         self.log("Page Up Down loaded")
         try:
@@ -703,6 +783,14 @@ class PageButtonsPlugin(BasePlugin):
                 self.enabled_t = 0.0
         except Exception as e:
             _log("lift bump 5b: %s" % e)
+        try:   # 1.7.2, once: 2% of the screen lower (23 was the 1.7.1 default)
+            if not self.get_setting("lift_down_2", False):
+                cur = self._num("lift", 23, LIFT_MIN, LIFT_MAX)
+                self.set_setting("lift", str(int(round(max(LIFT_MIN, cur - 2)))))
+                self.set_setting("lift_down_2", True)
+                self.enabled_t = 0.0
+        except Exception as e:
+            _log("lift down 2: %s" % e)
         try:   # 1.6.1, once (owner 11-14-2026: "yes add another 3%")
             if not self.get_setting("bump_103b", False):
                 cur = self._num("scale", SCALE_DEFAULT, SCALE_MIN, SCALE_MAX)
@@ -1339,6 +1427,27 @@ class PageButtonsPlugin(BasePlugin):
             self.lift_px = float(round(h * self._num("lift", LIFT_DEFAULT, LIFT_MIN, LIFT_MAX) / 100.0))
         return self.enabled
 
+    def _room(self, st, sc):
+        """How many pixels a button resting at the bottom of the side column may move up and still sit wholly below
+        the chat header, inside the message list. None while the views have no size yet. Plain reads of view fields."""
+        try:
+            layout = st.layout
+            lv = get_private_field(st.chat, "chatListView")
+            b = st.btn["up"]
+            if lv is None or layout.getHeight() <= 0 or lv.getHeight() <= 0 or b.getHeight() <= 0:
+                return None
+            ll = jarray(jint)([0, 0])
+            lb = jarray(jint)([0, 0])
+            lv.getLocationInWindow(ll)
+            layout.getLocationInWindow(lb)
+            line = float(ll[1]) + float(lv.getPaddingTop())          # bottom edge of the chat header
+            rest_top = float(lb[1]) + float(b.getTop())                # the button's top with no translation
+            grow = float(b.getHeight()) * max(0.0, float(sc) - 1.0)   # a scaled button reaches higher
+            return max(0.0, rest_top - line - grow - dp(10))
+        except Exception as e:
+            _log("room: %s" % e)
+            return 0.0
+
     def _place(self, st):
         """Page up and down sit right above the end button, always visible, in fixed places;
         the other stock buttons (mentions, reactions) stack above all three."""
@@ -1369,7 +1478,31 @@ class PageButtonsPlugin(BasePlugin):
         # the same extra room goes between the end arrow and page down (stock spacing there is a 44 dp circle + 10 dp)
         first = dp(self.step_dp - STEP_DP) if shown and base > 0 else 0
         lift = self.lift_px if shown else 0.0
+        # 1.7.2 (XF on the 8 Pro aborted in its render thread on 11-14-2026: "Unable to create layer for glass_down_0,
+        # size 64x-64"). Every round button is a glass view; XF collects each one's place on screen and clips it to the
+        # message list (ChatActivity.getMergedVisibleBlurredPositions: top = max(list top, top), bottom = min(list
+        # bottom, bottom)). A button moved wholly above the list (the lift with the keyboard open, when the list is
+        # short) came out with a negative height and the renderer aborted. So: "room" is how far up a button may go and
+        # still sit fully below the chat header. The lift shrinks until page up fits, a button that still has no room
+        # is hidden (GONE, so XF does not count it), and nothing is ever placed above that line.
+        room = self._room(st, sc)
+        # XF's own buttons that show above the column (reactions heart, mentions) need their place kept free too
+        above = 0.0
+        if holders is not None and shown:
+            for i in range(2, len(holders)):
+                h = holders[i]
+                if h is not None:
+                    v = float(h.visibilityAnimator.getFloatValue())
+                    if v > 0.0:
+                        c = float(h.counterVisibilityAnimator.getFloatValue())
+                        above += (dp(44) + dp(10 + 10 * c)) * v * max(1.0, sc)
+        if room is None:
+            lift = 0.0                      # sizes not known yet (before the first layout): stock place, no lift
+        else:
+            room = max(0.0, room - above)   # what is left for this plugin's own buttons
+            lift = max(0.0, min(lift, room - (base + first + step)))
         y = base + first + lift
+        n_fit = 0
         if holders is not None and holders[BUTTON_PAGE_DOWN] is not None:
             eb = holders[BUTTON_PAGE_DOWN].button
             if abs(eb.getScaleX() - sc) > 0.001 and end_vis >= 0.999:   # 1.5.0: the end button takes the same size
@@ -1377,13 +1510,18 @@ class PageButtonsPlugin(BasePlugin):
                 eb.setScaleY(float(sc))
         for which in ("down", "up", "top", "side"):
             b = st.btn[which]
-            b.setVisibility(View.VISIBLE if shown else View.GONE)
+            fits = shown and (room is None or y <= room)
+            if fits:
+                n_fit += 1
+            b.setVisibility(View.VISIBLE if fits else View.GONE)
             b.setAlpha(1.0)
             b.setScaleX(float(sc))
             b.setScaleY(float(sc))
-            b.setTranslationY(float(-y))
+            b.setTranslationY(float(-y) if fits else 0.0)
             y += step
-        extra = 4 * step + first
+        extra = n_fit * step + first           # XF's heart and mentions sit right above the buttons that are shown
+        if room is not None:
+            room += above
         if holders is not None and (extra > 0 or lift > 0 or st.lifted):
             for i in range(0, len(holders)):
                 h = holders[i]
@@ -1394,6 +1532,8 @@ class PageButtonsPlugin(BasePlugin):
                     last = st.lifted.get(i)
                     stock = last[1] if last is not None and abs(cur - last[0]) < 0.5 else cur
                     new_y = stock - lift
+                    if room is not None and new_y < -room:
+                        new_y = min(stock, -room)       # never above the chat header
                     if abs(cur - new_y) > 0.5:
                         b.setTranslationY(new_y)
                     st.lifted[i] = (new_y, stock)
@@ -1416,6 +1556,8 @@ class PageButtonsPlugin(BasePlugin):
                     last = st.lifted.get(i)
                     stock = last[1] if last is not None and abs(cur - last[0]) < 0.5 else cur
                     new_y = stock - extra - lift
+                    if room is not None and new_y < -room:
+                        new_y = min(stock, -room)       # never above the chat header
                     if abs(cur - new_y) > 0.5:
                         b.setTranslationY(new_y)
                     st.lifted[i] = (new_y, stock)
