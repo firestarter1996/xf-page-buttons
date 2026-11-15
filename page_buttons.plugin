@@ -1,8 +1,8 @@
 __id__ = "page_buttons"
 __name__ = "Page Up Down"
-__description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left, everyone else on the right and every message clear of the buttons and every bubble tail pointing the mirrored way. A switch button above top flips the side with one tap; hold it to hide all the buttons until the topic is opened again. Every button has white arrows and a white ring with a dark edge so it reads in the sun, and fills with your accent blue while pressed. Page up is the exact inverse, a white circle with a black ring and a black arrow, so the button used most stands out. A Height on screen slider moves the whole column up or down. Every tap on these buttons and on a topic tab gives a very short haptic tick, like a keyboard key press. The share button next to messages is hidden. Sending a message while you are scrolled up no longer jumps the chat to the bottom (a setting, Jump to bottom after sending, off by default). Made by [firestarter1996](https://github.com/firestarter1996)."
+__description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place, and on either side every message, your own included, and every row of buttons under a message stays clear of them. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left, everyone else on the right and every message clear of the buttons and every bubble tail pointing the mirrored way. A switch button above top flips the side with one tap; hold it to hide all the buttons until the topic is opened again. Every button has white arrows and a white ring with a dark edge so it reads in the sun, and fills with your accent blue while pressed. Page up is the exact inverse, a white circle with a black ring and a black arrow, so the button used most stands out. A Height on screen slider moves the whole column up or down. Every tap on these buttons and on a topic tab gives a very short haptic tick, like a keyboard key press. The share button next to messages is hidden. Sending a message while you are scrolled up no longer jumps the chat to the bottom (a setting, Jump to bottom after sending, off by default). Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.7.3"
+__version__ = "1.7.4"
 
 # Two round buttons in the same style as the stock "scroll to bottom" button sit
 # right above it in the chat's side button column:
@@ -61,6 +61,14 @@ __version__ = "1.7.3"
 # performHapticFeedback(KEYBOARD_TAP), the system keyboard key press tick Gboard uses by default. It obeys
 # the system touch feedback setting and Nagram's own Disable vibration switch. Only inside the click
 # handlers: nothing on any draw, layout or scroll path, no timer, no logging.
+# Clear on the right too (1.7.4, owner 11-14-2026: "the spacing of the messages isn't changing enough when page
+# updown is inverted. Because certain messages still get covered up. Also, the messages are not equal width"): with
+# the buttons on the right (Swap off) stock puts your own bubbles against the right edge, right under the buttons,
+# and lets rows of inline buttons run under them. Now the right side is the mirror image of the left side: your own
+# bubbles move left by the width of the button strip when they are laid out, every text bubble gets a widest width
+# that ends left of the buttons (three margins: beside a sender picture, no picture, your own), and a row of inline
+# buttons is held to the same free width. All of it runs once per message when it is laid out or measured, never
+# while drawing or scrolling. The free strip follows the Button size setting.
 # Logcat tag: PageButtons.
 
 import time
@@ -136,6 +144,14 @@ CIRCLE_INSET_DP = 6     # the round glass circle sits 6 dp inside the 56 dp butt
 
 
 GUTTER_DP = 57
+# 1.7.4, buttons on the right: how much narrower than the free width the widest text of a bubble is, measured on
+# the 6 Pro so each kind ends where its mirror image starts when the buttons are on the left.
+PAD_AVATAR_DP = 85  # everyone else's bubble beside a sender picture
+PAD_PLAIN_DP = 47   # everyone else's bubble with no picture (private chats, channels)
+PAD_OUT_DP = 75     # your own bubble
+ROW_AVATAR_DP = 54  # the same three cases for a row of inline buttons
+ROW_PLAIN_DP = 26
+ROW_OUT_DP = 20
 TAIL_ROUNDING = 0.00001   # > 0 picks the stock outline path; too small to change any corner
 
 
@@ -470,6 +486,8 @@ class PageButtonsPlugin(BasePlugin):
         self.enabled = True
         self.avatar_hook = False
         self.side_left = False
+        self.fresh_hooks = False
+        self.gutter_px = dp(GUTTER_DP)     # 1.7.4: the strip of the chat kept free for the button column
         self.tail_hook = False
         self.share_orig = None
         self.hide_share = bool(self.get_setting("hide_share", True))
@@ -481,6 +499,16 @@ class PageButtonsPlugin(BasePlugin):
                 self.set_setting("side", 0)
         except Exception as e:
             _log("migrate side: %s" % e)
+        # 1.7.4: the message hooks go in right when the plugin loads, not when the first chat screen is set up.
+        # XF builds the messages of a chat on its own thread while the screen is still opening, so the first
+        # chat after a start could get its text laid out before the hooks existed (seen on the 6 Pro: stock
+        # width bubbles under the buttons in the first chat opened).
+        try:
+            if self._is_enabled():
+                self.side_left = bool(self.get_setting("swap", False))
+                self._hook_avatars()
+        except Exception as e:
+            _log("early hooks: %s" % e)
         ca_cls = find_class("org.telegram.ui.ChatActivity")
         side_cls = find_class("org.telegram.ui.Components.chat.layouts.ChatActivitySideControlsButtonsLayout")
         ctx_cls = find_class("android.content.Context")
@@ -937,9 +965,11 @@ class PageButtonsPlugin(BasePlugin):
         old = self.chats.get(int(layout.hashCode()))
         if old is not None:
             return
-        if self.side_left:
-            # 1.4.0: a chat screen first seen with Swap on (also right after the plugin reloads) lays its
-            # messages out once more, so bubbles laid out before the hooks existed get mirrored too
+        # 1.4.0: a chat screen first seen (also right after the plugin reloads) lays its messages out once
+        # more, so bubbles laid out before the hooks existed get their place too (1.7.4: on the right side
+        # only for the one screen that was open when the hooks went in)
+        if self.side_left or self.fresh_hooks:
+            self.fresh_hooks = False
             self._relayout(chat)
         # never two pairs: drop any buttons an earlier setup of this screen left behind
         for i in range(layout.getChildCount() - 1, -1, -1):
@@ -1043,7 +1073,9 @@ class PageButtonsPlugin(BasePlugin):
                 lc.setAccessible(True)
                 for i in range(msgs.size()):
                     try:
-                        lc.setBoolean(msgs.get(i), False)
+                        m = msgs.get(i)
+                        lc.setBoolean(m, False)
+                        m.measureInlineBotButtons()     # 1.7.4: button rows take the free width too
                     except Exception:
                         pass
             lv = get_private_field(chat, "chatListView")
@@ -1101,7 +1133,7 @@ class PageButtonsPlugin(BasePlugin):
                 lp.gravity = want
                 lp.height = -1
                 layout.setLayoutParams(lp)
-            if left and not self.avatar_hook:
+            if not self.avatar_hook:        # 1.7.4: the right side keeps the strip under the buttons free too
                 self._hook_avatars()
             if left and not self.tail_hook:
                 self._hook_tails()
@@ -1167,6 +1199,7 @@ class PageButtonsPlugin(BasePlugin):
         when it is laid out (a new message on screen, an edit, a resize); nothing runs while drawing
         or scrolling. Service messages are their own cell type and stay centered."""
         self.avatar_hook = True
+        self.fresh_hooks = True
         cell_cls = find_class("org.telegram.ui.Cells.ChatMessageCell")
         vis = cell_cls.getDeclaredField("isAvatarVisible")
         vis.setAccessible(True)
@@ -1182,9 +1215,40 @@ class PageButtonsPlugin(BasePlugin):
         side_gap = dp(40)
         plugin = self
 
+        try:
+            btn_f = cell_cls.getDeclaredField("botButtons")
+            btn_f.setAccessible(True)
+        except Exception as e:
+            btn_f = None
+            _log("row field: %s" % e)
+        row_out = dp(10)
+        out_trim = dp(9)
+
         class LayoutHook(MethodHook):
             def after_hooked_method(self, param):
                 if not plugin.side_left:
+                    # 1.7.4 (owner 11-14-2026: "certain messages still get covered up"): buttons on the right. Your
+                    # own bubbles hug the right edge in stock, right under the buttons. Each one moves left by the
+                    # width of the button strip, once, when it is laid out. Everyone else's bubbles stay where they
+                    # are and are kept narrow enough by the width hook.
+                    try:
+                        if not plugin.enabled:
+                            return
+                        cell = param.thisObject
+                        mo = cell.getMessageObject()
+                        if mo is None or not mo.isOutOwner():
+                            return
+                        off = int(plugin.gutter_px) - out_trim     # lines up with everyone else's right edge
+                        if cell.getCurrentMessagesGroup() is None:
+                            # never past the left edge: a single bubble or its button row keeps 8 dp
+                            vis_l = int(cell.getBackgroundDrawableLeft())
+                            if btn_f is not None and not btn_f.get(cell).isEmpty():
+                                vis_l = min(vis_l, int(cell.getMeasuredWidth()) - int(cell.getWidthForButtons()) - row_out)
+                            off = min(off, int(param.args[1]) + vis_l - gap_r)
+                        if off > 0:
+                            cell.offsetLeftAndRight(-off)
+                    except Exception as e:
+                        _log("clear: %s" % e)
                     return
                 try:
                     cell = param.thisObject
@@ -1242,11 +1306,13 @@ class PageButtonsPlugin(BasePlugin):
 
         class ActionHook(MethodHook):
             def after_hooked_method(self, param):
-                if plugin.side_left:
-                    try:
+                try:
+                    if plugin.side_left:
                         param.thisObject.offsetLeftAndRight(half)
-                    except Exception:
-                        pass
+                    elif plugin.enabled:        # 1.7.4: centered in the space left of the buttons
+                        param.thisObject.offsetLeftAndRight(-(int(plugin.gutter_px) // 2))
+                except Exception:
+                    pass
 
         try:
             act_cls = find_class("org.telegram.ui.Cells.ChatActionCell")
@@ -1264,9 +1330,40 @@ class PageButtonsPlugin(BasePlugin):
         narrow = dp(52)
         JInteger = jclass("java.lang.Integer")
 
+        AU = jclass("org.telegram.messenger.AndroidUtilities")
+        pad_av, pad_plain, pad_out = dp(PAD_AVATAR_DP), dp(PAD_PLAIN_DP), dp(PAD_OUT_DP)
+        row_av, row_plain, row_out_pad = dp(ROW_AVATAR_DP), dp(ROW_PLAIN_DP), dp(ROW_OUT_DP)
+
+        row_more = dp(7)
+
+        def kind_pad(mo, a, b, c):
+            """Which of the three margins fits this message (the same test stock uses for the picture)."""
+            if mo.isOutOwner():
+                return c
+            if bool(need_av.invoke(mo)) and not mo.messageOwner.isThreadMessage:
+                return a
+            return b
+
         class WidthHook(MethodHook):
             def after_hooked_method(self, param):
                 if not plugin.side_left:
+                    # 1.7.4: buttons on the right. Every text bubble (yours and everyone else's) gets the same
+                    # widest width, small enough that a bubble starting beside a sender picture ends left of the
+                    # button strip. Once per message when its text is laid out.
+                    try:
+                        if not plugin.enabled:
+                            return
+                        w = int(param.getResult())
+                        mo = param.thisObject
+                        lim = int(AU.displaySize.x) - int(plugin.gutter_px) - kind_pad(mo, pad_av, pad_plain, pad_out)
+                        if int(mo.wantedBotKeyboardWidth) > 0:
+                            lim -= row_more             # its button row is a little wider than the bubble
+                        if lim < narrow * 3:
+                            return                  # a very narrow window: leave stock alone
+                        if w > lim:
+                            param.setResult(JInteger(lim))
+                    except Exception as e:
+                        _log("width r: %s" % e)
                     return
                 try:
                     mo = param.thisObject
@@ -1279,6 +1376,28 @@ class PageButtonsPlugin(BasePlugin):
                     _log("width: %s" % e)
 
         self.hook_method(mo_cls.getDeclaredMethod("getMaxMessageTextWidth"), WidthHook())
+
+        # 1.7.4: a row of inline buttons under a message may be wider than its bubble (stock lets it run to the
+        # screen edge). It is held to the free width, so it never reaches under the buttons. Once per message.
+        class RowHook(MethodHook):
+            def after_hooked_method(self, param):
+                try:
+                    mo = param.thisObject
+                    if int(mo.wantedBotKeyboardWidth) <= narrow or not plugin.enabled:
+                        return                      # no button row (nearly every message): one field read
+                    if plugin.side_left:
+                        lim = int(AU.displaySize.x) - int(plugin.gutter_px) - row_av
+                    else:
+                        lim = int(AU.displaySize.x) - int(plugin.gutter_px) - kind_pad(mo, row_av, row_plain, row_out_pad)
+                    if lim > narrow and int(mo.wantedBotKeyboardWidth) > lim:
+                        mo.wantedBotKeyboardWidth = lim
+                except Exception as e:
+                    _log("row: %s" % e)
+
+        try:
+            self.hook_method(mo_cls.getDeclaredMethod("measureInlineBotButtons"), RowHook())
+        except Exception as e:
+            _log("row hook: %s" % e)
         _log("bubbles mirrored")
 
     def _hold_start(self, rep_run):
@@ -1492,6 +1611,8 @@ class PageButtonsPlugin(BasePlugin):
             self.gap_dp = self._num("gap", GAP_DEFAULT, GAP_MIN, GAP_MAX)
             self.scale = self._num("scale", SCALE_DEFAULT, SCALE_MIN, SCALE_MAX)
             self.step_dp = CIRCLE_DP * self.scale + self.gap_dp
+            # 1.7.4: the free strip follows the button size (never under 57 dp, never over a third of 400 dp)
+            self.gutter_px = dp(int(round(min(133.0, max(float(GUTTER_DP), CIRCLE_DP * self.scale + 8.0)))))
             try:
                 h = float(jclass("org.telegram.messenger.AndroidUtilities").displaySize.y)
             except Exception:
