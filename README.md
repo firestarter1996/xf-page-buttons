@@ -27,9 +27,19 @@ Long bot replies fill my chats. Flinging overshoots, and the stock button only j
 
 Off by default. On moves the whole button column to the left edge and mirrors the chat: your messages on the left, everyone else on the right, sender pictures on the right edge. Bubble tails flip too: everyone else's point right at their picture, yours point left, the way stock Telegram looks with the sides reversed.
 
-No button ever covers a message. Every bubble, yours and everyone else's, with or without a picture, albums and stickers included, starts to the right of the button column. Service messages and dates center in the space beside the buttons. With the switch off nothing changes.
+No button ever covers a message. Every bubble, yours and everyone else's, with or without a picture, albums and stickers included, starts to the right of the button column. Service messages and dates center in the space beside the buttons. With the switch off the buttons stay on the right and the chat keeps its usual sides, with the same free strip beside the buttons: your own messages and everyone else's stop to the left of them.
 
 A switch side button sits above the top button. One tap flips the column between right and left: the setting is saved and the open chat is laid out once on the new side.
+
+## What's new in 1.7.4 (11-14-2026)
+
+Messages stay clear of the buttons on the right side too. With the buttons on the right, your own bubbles sat against the right edge, under the buttons, and rows of buttons under a message ran under them as well.
+
+* Your own bubbles now stop left of the buttons, the mirror image of the left side layout.
+* Every text bubble has the same widest width on both sides, so bubbles beside a sender picture, bubbles in private chats and your own all end at the same line.
+* A row of buttons under a message is held to the free width.
+* The free strip follows the Button size setting.
+* The first chat opened after Nagram starts gets the same spacing as every other chat.
 
 ## What's new in 1.7.3 (11-14-2026)
 
