@@ -31,6 +31,13 @@ No button ever covers a message. Every bubble, yours and everyone else's, with o
 
 A switch side button sits above the top button. One tap flips the column between right and left: the setting is saved and the open chat is laid out once on the new side.
 
+## What's new in 1.7.5 (11-15-2026)
+
+Albums display and open correctly with the buttons on the left.
+
+* Every photo of an album moves together as one bubble, so the photos keep their order and the caption stays inside the bubble.
+* Tapping the left photo of an album and going back no longer opens the message menu behind the photo viewer.
+
 ## What's new in 1.7.4 (11-14-2026)
 
 Messages stay clear of the buttons on the right side too. With the buttons on the right, your own bubbles sat against the right edge, under the buttons, and rows of buttons under a message ran under them as well.
