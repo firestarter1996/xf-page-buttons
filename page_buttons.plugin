@@ -2,7 +2,7 @@ __id__ = "page_buttons"
 __name__ = "Page Up Down"
 __description__ = "Adds top, page up and page down buttons to every chat. Each page tap moves the messages exactly one screen, top jumps to the first message (hold it to pick a date), and the end button gets an arrow with a line under it. All four buttons stay in place, and on either side every message, your own included, and every row of buttons under a message stays clear of them. Swap buttons position puts the buttons on the left and mirrors the chat, with your messages on the left, everyone else on the right and every message clear of the buttons and every bubble tail pointing the mirrored way. A switch button above top flips the side with one tap; hold it to hide all the buttons until the topic is opened again. Every button has white arrows and a white ring with a dark edge so it reads in the sun, and fills with your accent blue while pressed. Page up is the exact inverse, a white circle with a black ring and a black arrow, so the button used most stands out. A Height on screen slider moves the whole column up or down. Every tap on these buttons and on a topic tab gives a very short haptic tick, like a keyboard key press. The share button next to messages is hidden. Sending a message while you are scrolled up no longer jumps the chat to the bottom (a setting, Jump to bottom after sending, off by default). Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.7.4"
+__version__ = "1.7.5"
 
 # Two round buttons in the same style as the stock "scroll to bottom" button sit
 # right above it in the chat's side button column:
@@ -1056,6 +1056,8 @@ class PageButtonsPlugin(BasePlugin):
         """One tap: save the other side, move the column, and lay the messages out once again."""
         try:
             self.set_setting("swap", not bool(self.get_setting("swap", False)))
+            if getattr(self, "group_off", None) is not None:
+                self.group_off.clear()      # 1.7.5: album moves are worked out again on the other side
             layout = get_private_field(chat, "sideControlsButtonsLayout")
             if layout is not None:
                 self._apply_side(layout, chat)
@@ -1260,6 +1262,17 @@ class PageButtonsPlugin(BasePlugin):
                     if pw <= 0:
                         return
                     left0 = int(param.args[1])      # where the list placed the cell (stock spot)
+                    group = cell.getCurrentMessagesGroup()
+                    if group is not None and not bool(group.isDocuments):
+                        # 1.7.5 (owner 11-15-2026: "Message context menu also pops up if I click to view the left
+                        # image, and then trigger the back button"): an album is one bubble made of one cell per
+                        # photo. Mirroring each cell on its own swapped the photos (the left one landed right),
+                        # pushed the caption off the bubble and left each photo's touch area where the other photo
+                        # is drawn, so a tap on the left photo also reached the message itself and its menu opened
+                        # behind the photo viewer. The whole album now moves as one block, so inside it everything
+                        # is exactly stock.
+                        plugin._mirror_group(cell, group, parent, pw, vis.getBoolean(cell))
+                        return
                     bl = int(cell.getBackgroundDrawableLeft())
                     br = int(cell.getBackgroundDrawableRight())
                     if br <= bl:
@@ -1296,6 +1309,50 @@ class PageButtonsPlugin(BasePlugin):
                         cell.getAvatarImage().setImageX(float(pw - edge))
                 except Exception as e:
                     _log("mirror: %s" % e)
+
+        def mirror_group(cell, group, parent, pw, avatar):
+            """1.7.5: every cell of one album gets the same move, so the album is mirrored as one block. The cell
+            being laid out sits at its stock spot; the other cells of the album keep the move they already got
+            (self.group_off), so their stock spots are known without a second layout. Runs on layout only."""
+            off_map = plugin.group_off
+            off_map[int(cell.hashCode())] = 0
+            cells = []
+            gl = None
+            gr = None
+            for i in range(int(parent.getChildCount())):
+                v = parent.getChildAt(i)
+                if v is None or not cell_cls.isInstance(v) or v.getCurrentMessagesGroup() is not group:
+                    continue
+                a = int(off_map.get(int(v.hashCode()), 0))
+                stock = int(v.getLeft()) - a
+                l = stock + int(v.getBackgroundDrawableLeft())
+                r = stock + int(v.getBackgroundDrawableRight())
+                if r <= l:
+                    continue
+                cells.append((v, a))
+                gl = l if gl is None else min(gl, l)
+                gr = r if gr is None else max(gr, r)
+            if not cells or gl is None or gr <= gl:
+                return
+            right_lim = pw - (edge if avatar else gap_r)
+            ts = pw - gr                         # the album's mirrored left edge
+            ts = min(ts, right_lim - (gr - gl))  # never past the right edge or into the sender pictures
+            ts = max(ts, gutter)                 # never under the button column
+            off = ts - gl
+            for v, a in cells:
+                if off != a:
+                    v.offsetLeftAndRight(off - a)
+                    off_map[int(v.hashCode())] = off
+            if avatar:
+                cell.getAvatarImage().setImageX(float(max(1, pw - edge)))
+            if len(off_map) > 400:               # recycled cells only; never grows past the views on screen
+                keep = set(int(v.hashCode()) for v, a in cells)
+                for k in list(off_map.keys()):
+                    if k not in keep:
+                        off_map.pop(k, None)
+
+        self._mirror_group = mirror_group
+        self.group_off = {}
 
         bool_t = jclass("java.lang.Boolean").TYPE
         int_t = jclass("java.lang.Integer").TYPE
